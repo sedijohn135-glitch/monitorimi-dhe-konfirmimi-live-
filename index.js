@@ -1,26 +1,49 @@
 /**
- * Watch Monitor MCP — v6.0
+ * Watch Monitor MCP — v7.0
  *
- * A market-data-only MCP server that monitors ICT sniper setups and
- * TRAP_NOT_CONFIRMED reads to a deterministic conclusion, and notifies a
- * human. It never places, modifies, or closes an order, and the account
- * side of the upstream cTrader connector is unreachable from here by
- * construction (see ALLOWLIST below).
+ * An MCP server that monitors ICT sniper setups and TRAP_NOT_CONFIRMED
+ * reads to a deterministic conclusion, notifies a human, and — when
+ * auto-trade is explicitly armed — submits the entry order itself the
+ * moment the confirmation sequence completes.
  *
  * Two state machines, one scheduler:
  *
- *   SETUP WATCH   ARMED → TOUCHED → CONFIRMING → RESOLVING → RESOLVED
- *                 resolutions: CONFIRMED | FAILED | EXPIRED | CANCELLED
+ *   SETUP WATCH   ARMED → TOUCHED → CONFIRMING → ENTRY_CONFIRMED →
+ *                 ORDER_SUBMITTED → RESOLVING → RESOLVED
+ *                 resolutions: EXECUTED | CONFIRMED | FAILED | EXPIRED |
+ *                 CANCELLED | EXECUTION_UNKNOWN
  *                 plus QUARANTINED, a non-terminal state entered when the
  *                 feed cannot be trusted to describe this instrument.
+ *                 CONFIRMED (rather than EXECUTED) is what a confirmed
+ *                 setup resolves to when auto-trade is off or the
+ *                 pre-submission checklist refused: the human is told to
+ *                 enter, exactly as in v6.
  *
  *   TRAP WATCH    ARMED → RESOLVING → RESOLVED
  *                 resolutions: CONDITIONS_MET | FLIPPED | EXPIRED | CANCELLED
- *                 A trap watch never produces an entry, SL or TP.
+ *                 A trap watch never produces an entry, SL or TP, and is
+ *                 never auto-traded.
+ *
+ * The confirmation sequence a setup watch must complete before an order
+ * exists — each step proven on price action that printed *after* the
+ * entry touch, in this order and no other:
+ *
+ *   SETUP VALID → ENTRY TOUCHED → REJECTION → M5 STRUCTURE SHIFT →
+ *   DISPLACEMENT → gates → ENTRY CONFIRMED → ORDER SUBMITTED → EXECUTED
  *
  * The invariant the whole design serves: a transient infrastructure
  * failure must never be able to present itself as market confirmation,
  * and an infrastructure failure must never silently erase a safety check.
+ * Auto-trade extends that invariant rather than relaxing it — every
+ * unknown in the pre-submission checklist (§13 of core.mjs) counts as a
+ * refusal, because the cost of a wrong order is unrecoverable and the
+ * cost of a missed one is a Telegram message.
+ *
+ * The Claude-facing MCP surface is unchanged: it still exposes market
+ * data plus the monitor's own tools, and still refuses every account and
+ * execution tool the upstream has. A client cannot ask this server to
+ * trade. Only the monitor's own confirmation loop can, on a watch that
+ * client registered, under the operator's env-level arming.
  */
 
 import express from "express";
@@ -30,18 +53,26 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   PERIOD_MS,
   TRAP_TIMEFRAMES,
+  advanceEntrySequence,
   advanceGeneration,
+  barClosedAfter,
   barKey,
   bodyClosedBeyond,
   calcATR,
   checkAcceptance,
   checkCISD,
+  checkMSS,
   checkSMT,
+  checkZoneRejection,
   classifyEngulfing,
   classifyWick,
   closedSeries,
+  computeOrderVolume,
   displacementCheck,
+  emptySequence,
+  entryZone,
   evaluateConfirmation,
+  evaluatePrerequisite,
   evaluateSafety,
   finiteNumber,
   formatLevel,
@@ -51,15 +82,20 @@ import {
   numericTimestampMs,
   oppositeBias,
   periodMs,
+  preflightExecution,
   priceTolerance,
+  stageOf,
   symbolCurrencies,
   trapWatchKey,
   updateSpreadHealth,
   validateTrapWatchInput,
   validateWatchInput,
+  volumeInConnectorUnits,
   watchKey,
+  zoneTouchLevel,
 } from "./lib/core.mjs";
 import { CTraderMcpClient, MarketData, asArray } from "./lib/upstream.mjs";
+import { Executor } from "./lib/execution.mjs";
 import { Notifier } from "./lib/notify.mjs";
 import { WatchStore, publicWatch } from "./lib/store.mjs";
 
@@ -142,7 +178,109 @@ const CONFIG = {
   statePath: process.env.STATE_FILE || "./data/watch-state.json",
   authToken: String(process.env.WATCH_MONITOR_AUTH_TOKEN || ""),
   allowedOrigin: process.env.ALLOWED_ORIGIN || "*",
+
+  // The post-touch confirmation sequence. Required by default: the whole
+  // point of the sequence is that a touch, a wick, or a single bearish
+  // candle is not an entry.
+  entrySequenceRequired: process.env.ENTRY_SEQUENCE_REQUIRED !== "false",
+  entryDisplacementMultiple: num(process.env.ENTRY_DISPLACEMENT_MULTIPLE, 1.8, 1.1),
+  entryDisplacementLookback: num(process.env.ENTRY_DISPLACEMENT_LOOKBACK, 10, 5),
+  entryMssSwingStrength: num(process.env.ENTRY_MSS_SWING_STRENGTH, 2, 1),
+  entryFadeAtrFraction: num(process.env.ENTRY_FADE_ATR_FRACTION, 0.5, 0),
+
+  autoTrade: autoTradeConfig(),
 };
+
+/**
+ * Auto-trade configuration.
+ *
+ * Two independent switches have to be thrown before this service can
+ * place an order: AUTO_TRADE_ENABLED and an exact confirmation phrase.
+ * A single boolean is too easy to set by accident — by a copied env
+ * file, a template, or a redeploy that inherits someone else's
+ * variables — and the failure mode is real money.
+ */
+export const AUTO_TRADE_CONFIRMATION_PHRASE = "I ACCEPT AUTOMATED ORDER EXECUTION";
+
+function contractSizeOverrides() {
+  const overrides = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("CONTRACT_SIZE_")) continue;
+    const size = Number(value);
+    if (Number.isFinite(size) && size > 0) overrides[key.slice("CONTRACT_SIZE_".length).toUpperCase()] = size;
+  }
+  return overrides;
+}
+
+function autoTradeConfig() {
+  const mode = String(process.env.AUTO_TRADE_VOLUME_MODE || "fixed").toLowerCase();
+  const volumeUnit = String(process.env.AUTO_TRADE_VOLUME_UNIT || "lots").toLowerCase();
+  const priceFormat = String(process.env.AUTO_TRADE_PRICE_FORMAT || "raw").toLowerCase();
+  return {
+    enabled: bool(process.env.AUTO_TRADE_ENABLED, false),
+    confirmation: String(process.env.AUTO_TRADE_CONFIRMED || ""),
+    dryRun: bool(process.env.AUTO_TRADE_DRY_RUN, false),
+    mode: ["fixed", "risk"].includes(mode) ? mode : "invalid",
+    fixedVolume: finiteNumber(process.env.AUTO_TRADE_FIXED_VOLUME),
+    riskPercent: num(process.env.AUTO_TRADE_RISK_PERCENT, 0.5, 0.01),
+    maxRiskPercent: num(process.env.AUTO_TRADE_MAX_RISK_PERCENT, 2, 0.01),
+    volumeUnit: ["lots", "units", "centi_units"].includes(volumeUnit) ? volumeUnit : "invalid",
+    volumeStep: num(process.env.AUTO_TRADE_VOLUME_STEP, 0.01, 0.000001),
+    minVolume: num(process.env.AUTO_TRADE_MIN_VOLUME, 0.01, 0.000001),
+    maxVolume: finiteNumber(process.env.AUTO_TRADE_MAX_VOLUME),
+    accountCurrency: String(process.env.AUTO_TRADE_ACCOUNT_CURRENCY || "USD").toUpperCase(),
+    contractSizes: contractSizeOverrides(),
+    priceFormat: ["raw", "scaled"].includes(priceFormat) ? priceFormat : "invalid",
+    priceScale: num(process.env.CTRADER_PRICE_SCALE, 100000, 1),
+    balanceIsScaled: bool(process.env.AUTO_TRADE_BALANCE_IS_SCALED, false),
+    orderType: String(process.env.AUTO_TRADE_ORDER_TYPE || "MARKET").toUpperCase(),
+    orderToolName: process.env.AUTO_TRADE_ORDER_TOOL || null,
+    positionsToolName: process.env.AUTO_TRADE_POSITIONS_TOOL || null,
+    balanceToolName: process.env.AUTO_TRADE_BALANCE_TOOL || null,
+    labelPrefix: String(process.env.AUTO_TRADE_LABEL_PREFIX || "WM"),
+    maxOpenPositions: num(process.env.AUTO_TRADE_MAX_OPEN_POSITIONS, 1, 1),
+    maxTradesPerDay: num(process.env.AUTO_TRADE_MAX_TRADES_PER_DAY, 3, 1),
+    maxPriceAgeMs: num(process.env.AUTO_TRADE_MAX_PRICE_AGE_MS, 15_000, 1000),
+    maxSlippageRiskFraction: num(process.env.AUTO_TRADE_MAX_SLIPPAGE_RISK_FRACTION, 0.25, 0.01),
+    maxAttempts: num(process.env.AUTO_TRADE_MAX_ATTEMPTS, 3, 1),
+    executionToolsTtlMs: num(process.env.UPSTREAM_TOOLS_TTL_MS, 10 * 60 * 1000, 60_000),
+    symbolAllowlist: new Set(
+      String(process.env.AUTO_TRADE_SYMBOLS || "")
+        .split(",")
+        .map((value) => value.trim().toUpperCase())
+        .filter(Boolean),
+    ),
+  };
+}
+
+/**
+ * Is auto-trade armed right now, and if not, exactly why? Returned as a
+ * reason rather than a boolean so /health, list_watches and the refusal
+ * notification all say the same specific thing.
+ */
+let autoTradePausedReason = null;
+
+export function autoTradeStatus(config = CONFIG.autoTrade) {
+  if (!config.enabled) return { armed: false, reason: "AUTO_TRADE_ENABLED is not true" };
+  if (config.confirmation !== AUTO_TRADE_CONFIRMATION_PHRASE) {
+    return {
+      armed: false,
+      reason: `AUTO_TRADE_CONFIRMED must be set to the exact phrase "${AUTO_TRADE_CONFIRMATION_PHRASE}"`,
+    };
+  }
+  if (config.mode === "invalid") return { armed: false, reason: "AUTO_TRADE_VOLUME_MODE must be fixed or risk" };
+  if (config.volumeUnit === "invalid") {
+    return { armed: false, reason: "AUTO_TRADE_VOLUME_UNIT must be lots, units or centi_units" };
+  }
+  if (config.priceFormat === "invalid") {
+    return { armed: false, reason: "AUTO_TRADE_PRICE_FORMAT must be raw or scaled" };
+  }
+  if (config.mode === "fixed" && !(config.fixedVolume > 0)) {
+    return { armed: false, reason: "AUTO_TRADE_FIXED_VOLUME must be set when the volume mode is fixed" };
+  }
+  if (autoTradePausedReason) return { armed: false, reason: autoTradePausedReason, paused: true };
+  return { armed: true, reason: null, dryRun: config.dryRun };
+}
 
 // Degradation must be measured against the watch's own cadence, not a
 // fixed wall-clock constant, or a slow trap watch reports itself broken.
@@ -164,6 +302,10 @@ const client = new CTraderMcpClient({
   log,
 });
 const market = new MarketData({ client, config: CONFIG, log });
+// The executor shares the upstream client with the market-data layer but
+// is reachable only from the confirmation loop below — never from a
+// tools/call, which is filtered against MARKET_DATA_TOOL_ALLOWLIST.
+const executor = new Executor({ client, config: CONFIG.autoTrade, log });
 const notifier = new Notifier({
   token: process.env.TELEGRAM_BOT_TOKEN,
   chatId: process.env.TELEGRAM_CHAT_ID,
@@ -212,13 +354,13 @@ function scheduleSave(immediate = false) {
   if (immediate) {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = null;
-    store.save({ outbox: notifier.serialize() });
+    store.save({ outbox: notifier.serialize(), autoTrade: { ...tradeCounter } });
     return;
   }
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    if (store.dirty) store.save({ outbox: notifier.serialize() });
+    if (store.dirty) store.save({ outbox: notifier.serialize(), autoTrade: { ...tradeCounter } });
   }, 1000);
 }
 
@@ -265,6 +407,104 @@ function confirmWatch(watch, price, result, gates) {
       `<b>Evidence:</b> ${htmlEscape(result.signals.join(" + "))}\n` +
       `<b>Strength:</b> ${htmlEscape(result.strength)}\n` +
       `<b>Kill zone:</b> ${htmlEscape(gates.zone || "disabled")}`,
+  );
+}
+
+/**
+ * The execution record, written in the exact terms the entry decision
+ * was made in. "Confirmation detected" is not an audit trail; this is.
+ */
+function executionLogLines(watch, execution) {
+  const sequence = watch.sequence || {};
+  const displacement = sequence.displacement || {};
+  const candle = displacement.candle;
+  return [
+    `<b>SETUP_ID:</b> ${htmlEscape(watch.setup_id || watch.id)}`,
+    `<b>TOUCH_PRICE:</b> ${htmlEscape(formatLevel(watch.entryTouchPrice ?? watch.entry))}`,
+    `<b>TOUCH_TIME:</b> ${htmlEscape(watch.entryTouchedAt || "unrecorded")}`,
+    `<b>REJECTION_PRICE:</b> ${htmlEscape(sequence.rejection ? `${formatLevel(sequence.rejection.price)} (${sequence.rejection.kind})` : "n/a")}`,
+    `<b>MSS_LEVEL:</b> ${htmlEscape(sequence.mss ? formatLevel(sequence.mss.level) : "n/a")}`,
+    `<b>DISPLACEMENT_CANDLE:</b> ${htmlEscape(
+      candle
+        ? `${new Date(candle.timestampMs).toISOString()} O ${formatLevel(candle.open)} C ${formatLevel(candle.close)} · body ${formatLevel(displacement.body)} vs ${formatLevel(displacement.threshold)} required`
+        : "n/a",
+    )}`,
+    `<b>CONFIRMATION_TIME:</b> ${htmlEscape(watch.confirmedAt || "unrecorded")}`,
+    `<b>EXECUTION_PRICE:</b> ${htmlEscape(formatLevel(execution.price))}`,
+    `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP:</b> ${htmlEscape(formatLevel(watch.tp1))}`,
+    `<b>VOLUME:</b> ${htmlEscape(String(execution.volume))} lot(s) → ${htmlEscape(String(execution.connectorVolume))} ${htmlEscape(execution.volumeUnit)}` +
+      (execution.riskAmount ? ` · risk ${htmlEscape(execution.riskAmount.toFixed(2))} ${htmlEscape(execution.accountCurrency)}` : ""),
+    `<b>ORDER:</b> ${htmlEscape(execution.orderId || execution.positionId || "accepted, no id returned")}`,
+  ];
+}
+
+function executedWatch(watch, execution) {
+  const direction = watch.direction === "buy" ? "LONG" : "SHORT";
+  const evidence = [
+    "Entry zone rejection",
+    `M5 ${watch.direction === "buy" ? "bullish" : "bearish"} MSS`,
+    `${watch.direction === "buy" ? "bullish" : "bearish"} displacement`,
+  ].join(" + ");
+  return resolveWatch(
+    watch,
+    "EXECUTED",
+    { resolvedPrice: execution.price, execution, signals: watch.lastSignals || [] },
+    `<b>ENTRY CONFIRMED — ${htmlEscape(direction)}</b>${execution.dryRun ? " <i>(DRY RUN — no order was sent)</i>" : ""}\n` +
+      `<b>Reason:</b> ${htmlEscape(evidence)}\n` +
+      `<b>Execution:</b> ${htmlEscape(formatLevel(execution.price))} on ${htmlEscape(watch.symbol)}\n` +
+      executionLogLines(watch, execution).join("\n"),
+  );
+}
+
+/**
+ * Confirmed, but no order was placed. The setup is still real — this is
+ * the v6 outcome — so the human gets the same actionable alert plus the
+ * exact reason the automated path stood down.
+ */
+function confirmedNotExecutedWatch(watch, price, result, gates, refusal) {
+  return resolveWatch(
+    watch,
+    "CONFIRMED",
+    {
+      resolvedPrice: price,
+      signals: result.signals,
+      strength: result.strength,
+      gates: gates.summary,
+      execution: { submitted: false, refused: refusal.failures, reason: refusal.reason },
+    },
+    `<b>REAL CONFIRMATION — ENTER MANUALLY</b>\n` +
+      `<b>Symbol:</b> ${htmlEscape(watch.symbol)}\n` +
+      `<b>Direction:</b> ${htmlEscape(watch.direction.toUpperCase())}\n` +
+      `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>Price:</b> ${htmlEscape(formatLevel(price))}\n` +
+      `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+      `<b>Evidence:</b> ${htmlEscape(result.signals.join(" + "))}\n` +
+      `<b>Auto-trade stood down:</b> ${htmlEscape(refusal.reason)}\n` +
+      (refusal.failures?.length
+        ? `<b>Checks that failed:</b> ${htmlEscape(refusal.failures.map((failure) => `${failure.code} (${failure.detail})`).join(" | "))}\n`
+        : "") +
+      `<i>The setup is confirmed. The order was not placed.</i>`,
+    "critical",
+  );
+}
+
+/**
+ * The one outcome that must never be quiet: an order left the process and
+ * its fate is unknown. No retry, no assumption in either direction — the
+ * human is told to look at the terminal.
+ */
+function executionUnknownWatch(watch, detail) {
+  return resolveWatch(
+    watch,
+    "EXECUTION_UNKNOWN",
+    { execution: { ...(watch.execution || {}), outcome: "UNKNOWN", detail } },
+    `<b>⚠ ORDER OUTCOME UNKNOWN — CHECK YOUR TERMINAL NOW</b>\n` +
+      `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(watch.direction.toUpperCase())} ` +
+      `${htmlEscape(String(watch.execution?.volume ?? "?"))} lot(s)\n` +
+      `<b>Problem:</b> ${htmlEscape(detail)}\n` +
+      `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+      `<b>Action:</b> an order was sent and the monitor could not read back whether it filled. ` +
+      `Check the account manually. This watch is no longer monitored.`,
+    "critical",
   );
 }
 
@@ -488,6 +728,65 @@ async function applyExternalGates(watch, spread) {
 // ---------------------------------------------------------------------------
 // §6 Setup watch engine
 
+/**
+ * The two rules a setup may declare about its own validity, both of them
+ * about closes rather than prints:
+ *
+ *   prerequisite   what must have happened before entry is live at all
+ *                  ("M15 body close below 4324.71")
+ *   invalidation   what kills the setup ("M15 body close above 4368.31")
+ *
+ * Both return an explicit unknown when the candles cannot be read, and
+ * the caller treats unknown as "do not proceed" for the prerequisite and
+ * "do not invalidate" for the invalidation — in both directions the
+ * unknown answer is the one that does not open or abandon a position on
+ * missing data.
+ */
+async function evaluateStructuralRules(watch, symbolId, nowMs) {
+  const result = {
+    prerequisite: { satisfied: true, known: true, detail: "no prerequisite declared" },
+    invalidationConfirmed: watch.invalidation_rule === "body_close" ? null : undefined,
+  };
+
+  const series = async (timeframe) => {
+    const raw = await market.bars(watch.symbol, symbolId, timeframe, 40);
+    return closedSeries(raw || [], timeframe, { nowMs, staleBars: 3 });
+  };
+
+  if (watch.prerequisite) {
+    const bars = await series(watch.prerequisite.timeframe);
+    result.prerequisite =
+      bars.status === "OK" && bars.bars.length
+        ? evaluatePrerequisite(watch.prerequisite, bars.bars.slice(-30), { nowMs })
+        : {
+            satisfied: false,
+            known: false,
+            detail: `${watch.prerequisite.timeframe} candles unavailable (${bars.status})`,
+          };
+  }
+
+  if (watch.invalidation_rule === "body_close") {
+    const timeframe = watch.invalidation_timeframe || "M15";
+    const bars = await series(timeframe);
+    const span = periodMs(timeframe);
+    const riskLine = watch.invalidation ?? watch.sl;
+    if (bars.status === "OK" && bars.bars.length) {
+      // Only bars that closed after this watch was armed can invalidate
+      // it: an earlier close beyond the level is part of the history the
+      // analyst already priced in.
+      result.invalidationConfirmed = bars.bars.some(
+        (bar) =>
+          barClosedAfter(bar, span, watch.armedAtMs) &&
+          bodyClosedBeyond(bar, riskLine, oppositeBias(watch.direction)),
+      );
+    } else {
+      result.invalidationConfirmed = null;
+    }
+  }
+
+  return result;
+}
+
 const SMT_BUNDLES = {
   XAUUSD: [{ symbol: "XAGUSD" }, { symbol: "EURUSD", inverse: true }],
   XAGUSD: [{ symbol: "XAUUSD" }, { symbol: "EURUSD", inverse: true }],
@@ -520,6 +819,29 @@ async function tickSetupWatch(watch) {
   if (mainId === undefined) {
     watch.lastReason = "symbol_unavailable";
     noteDataQuality(watch, false, "symbol is unavailable from cTrader");
+    return;
+  }
+
+  // A watch that reached ORDER_SUBMITTED and is still being ticked means
+  // the submission path did not finish — the process survived, but the
+  // outcome was never written back. Resolve it against the account
+  // rather than letting it sit in a state that keeps re-entering the
+  // execution branch.
+  if (watch.lifecycle === "ORDER_SUBMITTED" && watch.execution?.submitted && !watch.execution?.completed) {
+    const positions = await executor.openPositions(watch.symbol, mainId);
+    if (positions.known && positions.forSymbol.length) {
+      watch.execution.completed = true;
+      watch.execution.reconciled = true;
+      watch.execution.positionId = positions.forSymbol[0].id;
+      executedWatch(watch, watch.execution);
+    } else {
+      executionUnknownWatch(
+        watch,
+        positions.known
+          ? "the submission did not complete and no matching position exists"
+          : "the submission did not complete and open positions could not be read",
+      );
+    }
     return;
   }
 
@@ -568,7 +890,16 @@ async function tickSetupWatch(watch) {
   // now runs before evidence, on every tick, in ARMED, TOUCHED and
   // CONFIRMING alike, and it runs even when the spread is abnormal: a bad
   // quote must not make the service ignore an adverse move.
-  const safety = evaluateSafety(watch, { mid, executable, protective, tolerance });
+  const rules = await evaluateStructuralRules(watch, mainId, now);
+  const zone = entryZone(watch, tolerance);
+  const safety = evaluateSafety(watch, {
+    mid,
+    executable,
+    protective,
+    tolerance,
+    touchLevel: zoneTouchLevel(watch, tolerance),
+    invalidationConfirmed: rules.invalidationConfirmed === true,
+  });
   if (safety.action === "FAIL") {
     watch.lastReason = "risk_line_breached";
     failWatch(watch, safety.price, safety.reason);
@@ -579,17 +910,36 @@ async function tickSetupWatch(watch) {
     expireWatch(watch, safety.reason, safety.price);
     return;
   }
+
+  // The setup's own prerequisite gates everything downstream of it. An
+  // untouched entry cannot be armed, and an unproven prerequisite is not
+  // a satisfied one — but the safety checks above still ran, so an
+  // adverse move is still caught while the setup waits.
+  watch.prerequisiteSatisfied = rules.prerequisite.satisfied;
+  watch.prerequisiteDetail = rules.prerequisite.detail;
+  if (!rules.prerequisite.satisfied) {
+    watch.lastReason = rules.prerequisite.known
+      ? "waiting_for_setup_confirmation"
+      : "prerequisite_unverifiable";
+    noteDataQuality(watch, rules.prerequisite.known, rules.prerequisite.detail);
+    return;
+  }
+
   if (safety.action === "TOUCH") {
     watch.entryTouched = true;
     watch.entryTouchedAt = new Date().toISOString();
+    watch.entryTouchedAtMs = now;
+    watch.entryTouchPrice = safety.price;
+    watch.sequence = emptySequence();
     watch.lifecycle = "TOUCHED";
     watch.lastReason = "entry_touched";
     store.dirty = true;
     notify(
       `<b>ENTRY TOUCHED</b>\n` +
         `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(watch.direction.toUpperCase())}\n` +
-        `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>Price:</b> ${htmlEscape(formatLevel(safety.price))}\n` +
-        `<i>Waiting for persistent live confirmation.</i>`,
+        `<b>Zone:</b> ${htmlEscape(formatLevel(zone.low))}–${htmlEscape(formatLevel(zone.high))} | ` +
+        `<b>Price:</b> ${htmlEscape(formatLevel(safety.price))}\n` +
+        `<i>No entry yet. Waiting for rejection → M5 structure shift → displacement.</i>`,
       { dedupeKey: `${watch.id}:touched` },
     );
   } else if (safety.action === "WAIT") {
@@ -667,6 +1017,55 @@ async function tickSetupWatch(watch) {
   }
   noteDataQuality(watch, true);
 
+  // -- The post-touch entry sequence ----------------------------------------
+  //
+  // Rejection → M5 structure shift → displacement, each proven on a bar
+  // that closed after the touch, in that order. This runs alongside the
+  // evidence machine rather than replacing it: the evidence machine
+  // proves the read persisted under observation, the sequence proves it
+  // is the read the setup actually described.
+  const lastM5 = m5.bars.at(-1);
+  const touchedAtMs =
+    finiteNumber(watch.entryTouchedAtMs) ??
+    (watch.entryTouchedAt ? Date.parse(watch.entryTouchedAt) : null);
+  const fadeBuffer = Math.max(tolerance, atrM5 * CONFIG.entryFadeAtrFraction);
+  const faded =
+    watch.direction === "buy" ? mid < zone.low - fadeBuffer : mid > zone.high + fadeBuffer;
+  const displacement = barClosedAfter(lastM5, PERIOD_MS.M5, touchedAtMs)
+    ? displacementCheck(
+        m5.bars,
+        watch.direction,
+        CONFIG.entryDisplacementMultiple,
+        CONFIG.entryDisplacementLookback,
+      )
+    : { present: false, body: null, threshold: null };
+
+  watch.sequence = advanceEntrySequence(
+    watch.sequence,
+    {
+      faded,
+      fadedReason: faded ? `price left the entry zone by more than ${formatLevel(fadeBuffer)}` : null,
+      rejection: checkZoneRejection(lastM5, watch, zone, atrM5, PERIOD_MS.M5, touchedAtMs),
+      mss: checkMSS(m5.bars, watch.direction, PERIOD_MS.M5, touchedAtMs, {
+        strength: CONFIG.entryMssSwingStrength,
+      }),
+      mssTimeframe: "M5",
+      displacement,
+      displacementCandle: displacement.present
+        ? {
+            timestampMs: lastM5.timestampMs,
+            open: lastM5.open,
+            high: lastM5.high,
+            low: lastM5.low,
+            close: lastM5.close,
+          }
+        : null,
+      barKey: barKey(lastM5),
+    },
+    { nowIso: new Date(now).toISOString() },
+  );
+  const sequenceReady = !CONFIG.entrySequenceRequired || watch.sequence.complete;
+
   const result = evaluateConfirmation(watch, signals, {
     mid,
     tolerance,
@@ -680,7 +1079,7 @@ async function tickSetupWatch(watch) {
   watch.lastSignals = result.signals;
   store.dirty = true;
 
-  if (!result.enter) {
+  if (!result.enter || !sequenceReady) {
     // Evidence that had graduated and then decayed must walk the
     // lifecycle backwards, visibly, rather than leaving the watch parked
     // in CONFIRMING with nothing behind it.
@@ -688,6 +1087,12 @@ async function tickSetupWatch(watch) {
       watch.lifecycle = "TOUCHED";
       watch.lastReason = "evidence_decayed";
       watch.lastGateBlockReason = null;
+    } else if (!sequenceReady) {
+      watch.lastReason = !watch.sequence.rejection
+        ? "awaiting_zone_rejection"
+        : !watch.sequence.mss
+          ? "awaiting_m5_structure_shift"
+          : "awaiting_displacement";
     } else {
       watch.lastReason = "evidence_pending";
     }
@@ -699,8 +1104,28 @@ async function tickSetupWatch(watch) {
 
   const gates = await applyExternalGates(watch, spread);
   if (gates.pass) {
-    watch.lastReason = "confirming";
-    confirmWatch(watch, mid, result, gates);
+    watch.lifecycle = "ENTRY_CONFIRMED";
+    watch.confirmedAt = new Date(now).toISOString();
+    watch.confirmedAtMs = now;
+    watch.lastReason = "entry_confirmed";
+    store.dirty = true;
+
+    const auto = autoTradeStatus();
+    if (!auto.armed) {
+      // v6 behaviour, unchanged, and it is still the default: the human
+      // is told to enter and nothing is sent to the broker.
+      confirmWatch(watch, mid, result, gates);
+      return;
+    }
+    await executeConfirmedWatch(watch, {
+      mid,
+      spot,
+      symbolId: mainId,
+      result,
+      gates,
+      nowMs: now,
+      dryRun: auto.dryRun === true,
+    });
     return;
   }
   const reasonText = gates.reasons.join(" | ");
@@ -715,6 +1140,279 @@ async function tickSetupWatch(watch) {
       { dedupeKey: `${watch.id}:gate:${reasonText}` },
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// §6b Order execution
+//
+// Reached only from the confirmation branch above, only for a SETUP
+// watch whose entry sequence completed after its own touch and whose
+// gates passed, and only when auto-trade is armed at the environment
+// level. Everything here is written so that the failure modes rank in
+// this order, worst first:
+//
+//   1. two orders for one setup        — prevented by a single-shot
+//                                        submission flag persisted
+//                                        BEFORE the call leaves
+//   2. an order whose fate is unknown  — never assumed; reconciled
+//                                        against open positions, and if
+//                                        that cannot be read, resolved
+//                                        EXECUTION_UNKNOWN and shouted
+//   3. no order when there should be   — resolves CONFIRMED, which is
+//                                        the v6 behaviour and a Telegram
+//                                        message the human can act on
+//
+// Anything that cannot be established counts as a refusal, so the third
+// outcome absorbs every unknown the first two do not.
+
+const tradeCounter = { day: null, count: 0 };
+
+function todayKey(nowMs) {
+  return new Date(nowMs).toISOString().slice(0, 10);
+}
+
+function tradesToday(nowMs) {
+  const day = todayKey(nowMs);
+  if (tradeCounter.day !== day) {
+    tradeCounter.day = day;
+    tradeCounter.count = 0;
+  }
+  return tradeCounter.count;
+}
+
+function recordTrade(nowMs) {
+  tradesToday(nowMs);
+  tradeCounter.count += 1;
+}
+
+function refuse(watch, reason, failures, context) {
+  confirmedNotExecutedWatch(watch, context.mid, context.result, context.gates, { reason, failures });
+}
+
+async function executeConfirmedWatch(watch, context) {
+  const config = CONFIG.autoTrade;
+  const { symbolId, nowMs, dryRun } = context;
+  watch.execution = watch.execution || { attempts: 0, submitted: false };
+
+  if (watch.execution.submitted) {
+    // Belt and braces: the scheduler cannot re-enter a submitted watch,
+    // but if it ever did, this is the line that stops a second order.
+    watch.lastReason = "order_already_submitted";
+    return;
+  }
+  if (config.symbolAllowlist.size && !config.symbolAllowlist.has(watch.symbol)) {
+    refuse(watch, `${watch.symbol} is not in AUTO_TRADE_SYMBOLS`, [], context);
+    return;
+  }
+  if (watch.auto_trade === false) {
+    refuse(watch, "this setup was registered with auto_trade disabled", [], context);
+    return;
+  }
+
+  // -- Facts the checklist needs -------------------------------------------
+  const account = config.mode === "risk" ? await executor.balance() : { known: true, balance: null };
+  const positions = await executor.openPositions(watch.symbol, symbolId);
+
+  const sizing = computeOrderVolume({
+    mode: config.mode,
+    fixedVolume: config.fixedVolume,
+    explicitVolume: watch.volume ?? null,
+    balance: account.balance ?? null,
+    riskPercent: watch.risk_percent ?? config.riskPercent,
+    entry: watch.entry,
+    stop: watch.sl,
+    symbol: watch.symbol,
+    accountCurrency: config.accountCurrency,
+    contractSizes: config.contractSizes,
+    minVolume: config.minVolume,
+    maxVolume: config.maxVolume,
+    volumeStep: config.volumeStep,
+  });
+  const connectorVolume =
+    sizing.volume === null
+      ? null
+      : volumeInConnectorUnits(sizing.volume, watch.symbol, config.volumeUnit, config.contractSizes);
+
+  // The quote the order is checked against is fetched fresh, not reused
+  // from the top of the tick: seconds matter here and a cached mid is
+  // exactly the kind of stale input this service refuses elsewhere.
+  // There is deliberately no fallback to the tick's cached quote: if the
+  // upstream cannot produce a live price at the moment of submission,
+  // the confirmation is not backed by live market data and the checklist
+  // must be able to see that.
+  const fetchedAtMs = Date.now();
+  const fresh = await market.spot(watch.symbol, symbolId, { maxAgeMs: 0 });
+  const price = fresh ? (watch.direction === "buy" ? fresh.ask : fresh.bid) : null;
+  const priceAgeMs = fresh
+    ? finiteNumber(fresh.timestampMs) !== null
+      ? Date.now() - fresh.timestampMs
+      : Date.now() - fetchedAtMs
+    : null;
+  const riskDistance = Math.abs(watch.entry - (watch.invalidation ?? watch.sl));
+
+  const preflight = preflightExecution({
+    watch,
+    symbol: watch.symbol,
+    symbolId,
+    direction: watch.direction,
+    price,
+    priceAgeMs,
+    maxPriceAgeMs: config.maxPriceAgeMs,
+    confirmationPrice: context.mid,
+    maxDeviation: riskDistance * config.maxSlippageRiskFraction,
+    sl: watch.sl,
+    tp: watch.tp1,
+    volume: sizing.volume,
+    volumeReason: sizing.reason,
+    connectorVolume,
+    riskAmount: sizing.riskAmount ?? null,
+    balance: account.balance ?? null,
+    maxRiskPercent: config.maxRiskPercent,
+    positionsKnown: positions.known,
+    // A position the connector reports without an id is still a position.
+    existingPosition:
+      positions.known && positions.forSymbol.length
+        ? positions.forSymbol[0].id || "an open position with no id"
+        : null,
+    openPositionCount: positions.known ? positions.list.length : undefined,
+    maxOpenPositions: config.maxOpenPositions,
+    tradesToday: tradesToday(nowMs),
+    maxTradesPerDay: config.maxTradesPerDay,
+    alreadySubmitted: watch.execution.submitted === true,
+    touchedAtMs: finiteNumber(watch.entryTouchedAtMs),
+    confirmedAtMs: finiteNumber(watch.confirmedAtMs),
+    sequenceComplete: Boolean(watch.sequence?.complete),
+    liveData: Boolean(fresh),
+  });
+
+  if (!preflight.ok) {
+    watch.execution.attempts += 1;
+    watch.execution.lastFailures = preflight.failures;
+    const canRetry = preflight.retryable && watch.execution.attempts < config.maxAttempts;
+    if (canRetry) {
+      // A stale quote or an unreadable positions call is a reason to look
+      // again on the next tick, not a reason to abandon a confirmed
+      // setup. The lifecycle steps back so the sequence keeps being
+      // re-proven while it waits.
+      watch.lifecycle = "CONFIRMING";
+      watch.lastReason = "execution_retry";
+      log(
+        `watch ${watch.id} execution deferred (${preflight.failures.map((failure) => failure.code).join(",")})`,
+      );
+      return;
+    }
+    refuse(
+      watch,
+      preflight.retryable
+        ? `pre-submission checks did not clear after ${watch.execution.attempts} attempts`
+        : "a pre-submission check failed",
+      preflight.failures,
+      context,
+    );
+    return;
+  }
+
+  // -- Single-shot submission ----------------------------------------------
+  //
+  // The flag is written and flushed to disk before the request leaves the
+  // process. A crash between here and the response therefore comes back
+  // as "submitted, outcome unknown" on the next boot, which is
+  // reconcilable — rather than as a re-armed watch that submits again.
+  const label = `${config.labelPrefix}-${(watch.setup_id || watch.id).slice(0, 24)}`;
+  watch.execution = {
+    ...watch.execution,
+    submitted: true,
+    completed: false,
+    submittedAt: new Date().toISOString(),
+    label,
+    volume: sizing.volume,
+    connectorVolume,
+    volumeUnit: config.volumeUnit,
+    volumeBasis: sizing.basis,
+    riskAmount: sizing.riskAmount ?? null,
+    accountCurrency: config.accountCurrency,
+    balance: account.balance ?? null,
+    price,
+    dryRun,
+  };
+  watch.lifecycle = "ORDER_SUBMITTED";
+  watch.lastReason = "order_submitted";
+  store.dirty = true;
+  scheduleSave(true);
+
+  const submission = await executor.submit({
+    symbol: watch.symbol,
+    symbolId,
+    direction: watch.direction,
+    volume: connectorVolume,
+    stopLoss: watch.sl,
+    takeProfit: watch.tp1,
+    label,
+    dryRun,
+  });
+
+  if (submission.ok) {
+    watch.execution.completed = true;
+    watch.execution.orderId = submission.orderId ?? null;
+    watch.execution.positionId = submission.positionId ?? null;
+    watch.execution.tool = submission.tool;
+    watch.execution.args = submission.args;
+    recordTrade(nowMs);
+    executedWatch(watch, watch.execution);
+    return;
+  }
+
+  // A deterministic rejection means nothing was opened; the setup falls
+  // back to the manual path with the broker's own reason attached.
+  if (submission.code === "REJECTED" || submission.code === "PAYLOAD_INCOMPLETE" || submission.code === "NO_ORDER_TOOL") {
+    watch.execution.completed = true;
+    watch.execution.submitted = false;
+    watch.execution.error = submission.error;
+    refuse(
+      watch,
+      `the broker did not accept the order: ${submission.error}`,
+      [{ code: submission.code, detail: submission.error }],
+      context,
+    );
+    return;
+  }
+
+  // A transport failure is the ambiguous case: the order may or may not
+  // have reached the broker. Never retried blindly — reconciled.
+  const after = await executor.openPositions(watch.symbol, symbolId);
+  if (after.known && after.forSymbol.length) {
+    watch.execution.completed = true;
+    watch.execution.reconciled = true;
+    watch.execution.positionId = after.forSymbol[0].id;
+    watch.execution.error = submission.error;
+    recordTrade(nowMs);
+    executedWatch(watch, watch.execution);
+    return;
+  }
+  if (after.known) {
+    // Provably nothing opened, so retrying is safe.
+    watch.execution.submitted = false;
+    watch.execution.completed = false;
+    watch.execution.attempts += 1;
+    watch.execution.error = submission.error;
+    if (watch.execution.attempts < config.maxAttempts) {
+      watch.lifecycle = "CONFIRMING";
+      watch.lastReason = "execution_retry_after_transport_error";
+      store.dirty = true;
+      return;
+    }
+    refuse(
+      watch,
+      `the order could not be sent after ${watch.execution.attempts} attempts: ${submission.error}`,
+      [{ code: submission.code || "UPSTREAM_ERROR", detail: submission.error }],
+      context,
+    );
+    return;
+  }
+  executionUnknownWatch(
+    watch,
+    `${submission.error}; open positions could not be read back to establish whether the order landed`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -989,7 +1687,7 @@ const CUSTOM_TOOLS = [
   {
     name: "register_watch",
     description:
-      "Registers a trading setup for live monitoring. The monitor tracks live price, safety levels, market evidence, and independent entry gates before sending a Telegram confirmation. Never places an order.",
+      "Registers a trading setup for live monitoring and, when the operator has armed auto-trade, for automatic execution. The monitor tracks live price and safety levels, waits for the entry zone to be touched, and then requires the full post-touch sequence — zone rejection, an M5 market-structure shift, and displacement — plus persistent evidence and the kill-zone/news/spread gates before it acts. A touch alone, a wick into the zone, a single candle, or an MSS without displacement never triggers an entry. If auto-trade is not armed, the confirmation is sent to Telegram for the human to take.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -999,11 +1697,46 @@ const CUSTOM_TOOLS = [
         direction: { type: "string", enum: ["buy", "sell"] },
         state: { type: "string", enum: ["WAIT", "ENGAGE", "ACTIVE"] },
         entry: { type: "number" },
+        entry_zone_low: {
+          type: "number",
+          description:
+            "Lower bound of the entry zone, e.g. 4330 for a 4330.00–4334.00 zone. The zone is touched at the edge price approaches from, not at its midpoint.",
+        },
+        entry_zone_high: { type: "number", description: "Upper bound of the entry zone." },
         sl: { type: "number" },
         invalidation: { type: "number" },
+        invalidation_rule: {
+          type: "string",
+          enum: ["touch", "body_close"],
+          description:
+            "How the invalidation level dies. body_close means a wick through the level is not invalidation — only a closed body beyond it on invalidation_timeframe is. The stop loss stays a hard price line either way.",
+        },
+        invalidation_timeframe: { type: "string", enum: TRAP_TIMEFRAMES },
+        prerequisite_level: {
+          type: "number",
+          description:
+            "A level the setup requires before entry is live at all, e.g. 4324.71 for 'M15 body close below 4324.71'. Until it prints, the watch reports WAITING_FOR_SETUP_CONFIRMATION and no touch is armed.",
+        },
+        prerequisite_timeframe: { type: "string", enum: TRAP_TIMEFRAMES },
+        prerequisite_rule: { type: "string", enum: ["body_close", "touch"] },
+        prerequisite_direction: { type: "string", enum: ["buy", "sell"] },
+        prerequisite_note: { type: "string" },
         tp1: { type: "number" },
         tp2: { type: "number" },
         tp3: { type: "number" },
+        risk_percent: {
+          type: "number",
+          description: "Per-setup override of the account risk percentage used to size the order.",
+        },
+        volume: {
+          type: "number",
+          description: "Explicit lot size for this setup, overriding both fixed and risk-based sizing.",
+        },
+        auto_trade: {
+          type: "boolean",
+          description:
+            "Set false to monitor this setup without ever executing it, even while auto-trade is armed. Setting true does not arm auto-trade; only the operator's environment can do that.",
+        },
         setup_model: { type: "string" },
         conviction: { type: "string" },
         session: { type: "string" },
@@ -1083,15 +1816,45 @@ const CUSTOM_TOOLS = [
     description: "Removes the manual breaking-news lockout.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
   },
+  {
+    name: "get_auto_trade_status",
+    description:
+      "Reports whether the monitor is armed to place orders on confirmation, the sizing and connector settings it would use, which upstream execution tools it discovered, and how many trades it has executed today.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "pause_auto_trade",
+    description:
+      "Kill switch. Stops the monitor placing any further orders; watches keep being monitored and confirmations keep arriving on Telegram for manual entry. Reversible with resume_auto_trade. It can never arm auto-trade — only the operator's environment can do that.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { reason: { type: "string" } },
+    },
+  },
+  {
+    name: "resume_auto_trade",
+    description:
+      "Lifts a pause set by pause_auto_trade. If auto-trade was never armed in the environment, this reports that it is still off.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+  },
 ];
 const CUSTOM_TOOL_NAMES = new Set(CUSTOM_TOOLS.map((tool) => tool.name));
 
-// Claude-facing exposure: MARKET DATA only. The upstream exposes 16
-// native tools; the 12 that read account state or place/modify/close
-// orders are unreachable from this endpoint. Enforced twice — once when
-// building tools/list so Claude never learns the tool exists, and again
-// on tools/call so a guessed name cannot be invoked. The monitor's own
-// loop is a separate code path and only ever calls the three read tools.
+// Claude-facing exposure: MARKET DATA only, unchanged by auto-trade. The
+// account and execution tools the upstream exposes remain unreachable
+// from this endpoint. Enforced twice — once when building tools/list so
+// a client never learns the tool exists, and again on tools/call so a
+// guessed name cannot be invoked.
+//
+// The monitor's own loop is a separate code path and is NOT filtered by
+// this list: besides the three market-data reads it calls the balance,
+// positions and order tools (lib/execution.mjs). That asymmetry is the
+// design. A client can ask this server to watch a setup; only the
+// server, having watched it to a complete confirmation sequence, can ask
+// the broker for a position. Widening this list would hand that decision
+// back to whoever holds the endpoint's token, which is the one thing the
+// arrangement is meant to prevent.
 const MARKET_DATA_TOOL_ALLOWLIST = new Set([
   "get_version",
   "get_symbols",
@@ -1175,9 +1938,82 @@ function textResult(payload) {
   return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
 }
 
+/**
+ * Everything a human needs to answer "would this place a trade right
+ * now, with what size, through which tool?" — including the three
+ * connector conventions that cannot be verified from inside this
+ * process and therefore have to be read and confirmed by a person.
+ */
+async function autoTradeReport() {
+  const config = CONFIG.autoTrade;
+  const status = autoTradeStatus();
+  const tools = status.armed ? await executor.resolveTools() : executor.resolved;
+  return {
+    ...status,
+    dry_run: config.dryRun,
+    confirmation_phrase_required: AUTO_TRADE_CONFIRMATION_PHRASE,
+    sizing: {
+      mode: config.mode,
+      fixed_volume: config.fixedVolume,
+      risk_percent: config.riskPercent,
+      max_risk_percent: config.maxRiskPercent,
+      min_volume: config.minVolume,
+      max_volume: config.maxVolume,
+      volume_step: config.volumeStep,
+      account_currency: config.accountCurrency,
+      contract_size_overrides: config.contractSizes,
+    },
+    connector_conventions: {
+      volume_unit: config.volumeUnit,
+      price_format: config.priceFormat,
+      order_type: config.orderType,
+      note: "These three cannot be verified from here. Run once with AUTO_TRADE_DRY_RUN=true and read the payload in the logs before trusting them.",
+    },
+    limits: {
+      max_open_positions: config.maxOpenPositions,
+      max_trades_per_day: config.maxTradesPerDay,
+      max_price_age_ms: config.maxPriceAgeMs,
+      max_slippage_risk_fraction: config.maxSlippageRiskFraction,
+      max_attempts: config.maxAttempts,
+      symbol_allowlist: [...config.symbolAllowlist],
+    },
+    entry_sequence: {
+      required: CONFIG.entrySequenceRequired,
+      displacement_multiple: CONFIG.entryDisplacementMultiple,
+      displacement_lookback: CONFIG.entryDisplacementLookback,
+      mss_swing_strength: CONFIG.entryMssSwingStrength,
+      states: [
+        "REGISTERED_WATCH",
+        "WAITING_FOR_SETUP_CONFIRMATION",
+        "READY_FOR_ENTRY",
+        "ENTRY_TOUCHED",
+        "REJECTION_DETECTED",
+        "M5_MSS_CONFIRMED",
+        "DISPLACEMENT_CONFIRMED",
+        "ENTRY_CONFIRMED",
+        "ORDER_SUBMITTED",
+        "EXECUTED",
+      ],
+    },
+    upstream_tools: {
+      order: tools?.order?.name ?? null,
+      order_source: tools?.order?.source ?? null,
+      order_schema_known: Boolean(tools?.order?.schema),
+      positions: tools?.positions?.name ?? null,
+      balance: tools?.balance?.name ?? null,
+    },
+    trades_today: tradesToday(Date.now()),
+    executor: executor.snapshot(),
+  };
+}
+
 function monitorHealth() {
   return {
-    schema: "watch-monitor/6.0",
+    schema: "watch-monitor/7.0",
+    auto_trade: autoTradeStatus(),
+    auto_trade_dry_run: CONFIG.autoTrade.dryRun,
+    trades_today: tradesToday(Date.now()),
+    execution: executor.snapshot(),
     recovered_at: store.recoveredAt,
     state_persisted: Boolean(CONFIG.statePath),
     last_saved_at: store.lastSavedAt,
@@ -1195,12 +2031,22 @@ function monitorHealth() {
 async function handleCustomTool(name, args = {}) {
   if (name === "register_watch") {
     const { watch, duplicate } = createSetupWatch(args);
+    const auto = autoTradeStatus();
+    const willTrade = auto.armed && watch.auto_trade !== false;
     if (!duplicate) {
       notify(
         `<b>WATCH ACTIVE</b>\n` +
           `<b>${htmlEscape(watch.symbol)}</b> — ${htmlEscape(watch.direction.toUpperCase())}\n` +
-          `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
-          `<i>Waiting for entry touch and persistent confirmation.</i>`,
+          `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))}` +
+          (watch.entry_zone_low !== null
+            ? ` (zone ${htmlEscape(formatLevel(watch.entry_zone_low))}–${htmlEscape(formatLevel(watch.entry_zone_high))})`
+            : "") +
+          ` | <b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+          (watch.prerequisite
+            ? `<b>Prerequisite:</b> ${htmlEscape(watch.prerequisite.timeframe)} ${htmlEscape(watch.prerequisite.rule)} beyond ${htmlEscape(formatLevel(watch.prerequisite.level))}\n`
+            : "") +
+          `<b>Auto-trade:</b> ${willTrade ? (CONFIG.autoTrade.dryRun ? "armed (DRY RUN — no order will be sent)" : "ARMED — an order will be placed on confirmation") : `off (${htmlEscape(watch.auto_trade === false ? "disabled for this setup" : auto.reason)})`}\n` +
+          `<i>Waiting for the entry touch, then rejection → M5 structure shift → displacement.</i>`,
         { dedupeKey: `${watch.id}:armed` },
       );
     }
@@ -1208,9 +2054,18 @@ async function handleCustomTool(name, args = {}) {
       status: duplicate ? "ALREADY_WATCHING" : "WATCHING",
       watch_id: watch.id,
       lifecycle: watch.lifecycle,
+      stage: stageOf(watch),
+      auto_trade: {
+        will_execute: willTrade,
+        dry_run: CONFIG.autoTrade.dryRun,
+        reason: willTrade ? null : watch.auto_trade === false ? "auto_trade disabled for this setup" : auto.reason,
+      },
       message: duplicate
         ? "This setup is already being monitored."
-        : `Monitoring started; first check runs immediately and then every ${CONFIG.setupIntervalMs / 1000}s.`,
+        : `Monitoring started; first check runs immediately and then every ${CONFIG.setupIntervalMs / 1000}s. ` +
+          (willTrade
+            ? "On a completed post-touch confirmation sequence the order is submitted automatically."
+            : "On confirmation a Telegram alert is sent; no order is placed."),
     });
   }
 
@@ -1308,6 +2163,33 @@ async function handleCustomTool(name, args = {}) {
     manualNewsLockout = { active: false, reason: null, setAt: null };
     notify("<b>NEWS LOCKOUT CLEARED</b>");
     return textResult({ status: "LOCKOUT_CLEARED" });
+  }
+
+  if (name === "get_auto_trade_status") {
+    return textResult(await autoTradeReport());
+  }
+
+  if (name === "pause_auto_trade") {
+    const reason = args.reason ? String(args.reason).slice(0, 300) : "Paused by request";
+    autoTradePausedReason = reason;
+    notify(
+      `<b>AUTO-TRADE PAUSED</b>\n<b>Reason:</b> ${htmlEscape(reason)}\n` +
+        `<i>Watches keep running; confirmations will be sent for manual entry.</i>`,
+      { priority: "critical" },
+    );
+    return textResult({ status: "AUTO_TRADE_PAUSED", reason, ...autoTradeStatus() });
+  }
+
+  if (name === "resume_auto_trade") {
+    autoTradePausedReason = null;
+    const status = autoTradeStatus();
+    notify(
+      status.armed
+        ? `<b>AUTO-TRADE RESUMED</b>${CONFIG.autoTrade.dryRun ? " <i>(dry run)</i>" : ""}`
+        : `<b>AUTO-TRADE STILL OFF</b>\n${htmlEscape(status.reason)}`,
+      { priority: "critical" },
+    );
+    return textResult({ status: status.armed ? "AUTO_TRADE_ARMED" : "AUTO_TRADE_OFF", ...status });
   }
 
   throw new Error(`Tool "${name}" not found`);
@@ -1409,7 +2291,7 @@ async function handleMcpRequest(req, res) {
       result: {
         protocolVersion: body.params?.protocolVersion || CONFIG.protocolVersion,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "cTrader + Watch Monitor MCP", version: "6.0.0" },
+        serverInfo: { name: "cTrader + Watch Monitor MCP", version: "7.0.0" },
       },
     });
     return;
@@ -1492,7 +2374,7 @@ app.get("/health", (req, res) => {
   const base = {
     status: "ok",
     service: "watch-monitor-mcp",
-    version: "6.0.0",
+    version: "7.0.0",
     watches: store.setups.size,
     trap_watches: store.traps.size,
     uptime_seconds: Math.floor(process.uptime()),
@@ -1592,8 +2474,34 @@ function boot() {
       "WARNING: WATCH_MONITOR_AUTH_TOKEN is unset — this endpoint is open to anyone who knows the URL.",
     );
   }
+  const auto = autoTradeStatus();
+  log(
+    auto.armed
+      ? `AUTO-TRADE ARMED${CONFIG.autoTrade.dryRun ? " (DRY RUN — no orders will be sent)" : ""}: ` +
+          `mode=${CONFIG.autoTrade.mode} unit=${CONFIG.autoTrade.volumeUnit} ` +
+          `priceFormat=${CONFIG.autoTrade.priceFormat} maxOpen=${CONFIG.autoTrade.maxOpenPositions} ` +
+          `maxPerDay=${CONFIG.autoTrade.maxTradesPerDay}`
+      : `auto-trade is OFF (${auto.reason}); confirmations will be notified, not executed`,
+  );
+  if (auto.armed) void executor.resolveTools(true);
+
   const recovery = store.load();
   notifier.restore(recovery.outbox);
+  if (recovery.autoTrade?.day === todayKey(Date.now())) {
+    tradeCounter.day = recovery.autoTrade.day;
+    tradeCounter.count = Number(recovery.autoTrade.count) || 0;
+    if (tradeCounter.count) log(`recovered today's trade count: ${tradeCounter.count}`);
+  }
+  for (const pending of recovery.executionUnknown || []) {
+    notify(
+      `<b>⚠ ORDER OUTCOME UNKNOWN AFTER RESTART</b>\n` +
+        `<b>${htmlEscape(pending.symbol)}</b> ${htmlEscape(String(pending.direction || "").toUpperCase())} ` +
+        `${htmlEscape(String(pending.volume ?? "?"))} lot(s), submitted ${htmlEscape(pending.submittedAt || "unknown")}\n` +
+        `<b>Action:</b> the monitor restarted between sending this order and recording what happened to it. ` +
+        `Check the account manually. It has NOT been resubmitted and is no longer monitored.`,
+      { dedupeKey: `${pending.id}:execution-unknown`, priority: "critical" },
+    );
+  }
   if (recovery.setups || recovery.traps || recovery.expired) {
     const offlineFor = recovery.savedAt
       ? `${Math.round((Date.now() - Date.parse(recovery.savedAt)) / 60000)} min`
