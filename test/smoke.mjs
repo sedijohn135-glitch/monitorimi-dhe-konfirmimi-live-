@@ -303,6 +303,93 @@ assert(
   `a trigger level irreconcilable with the feed is quarantined, not monitored (${trapWatch?.lifecycle})`,
 );
 
+console.log("\n— skill context —");
+const withContext = JSON.parse(
+  (
+    await rpc("tools/call", {
+      name: "register_watch",
+      arguments: {
+        setup_id: "smoke-skill",
+        symbol: "XAUUSD",
+        direction: "buy",
+        entry: 4414.5,
+        sl: 4400,
+        tp1: 4450,
+        skill_context: {
+          htf_mss_confirmed: true,
+          trap_phase: "delivery",
+          liquidity_swept: true,
+          m5_mss_already_observed: true,
+          htf_bias: "bullish",
+          conviction: "HIGH",
+          suggested_min_hold_ms: 15000,
+          suggested_max_age_ms: 180000,
+          skip_m5_sequence_if: "m5_mss_already_observed",
+          require_m1_only_if: "m5_mss_already_observed",
+        },
+      },
+    })
+  ).result.content[0].text,
+);
+assert(withContext.skill_context?.accepted === true, "a skill context is accepted and echoed back");
+assert(withContext.skill_context?.fast_lane_available === true, "the fast lane is available to it");
+assert(
+  withContext.skill_context?.effective_hold_ms === 15000,
+  `HIGH conviction shortened the hold (${withContext.skill_context?.effective_hold_ms}ms)`,
+);
+
+const conflicted = JSON.parse(
+  (
+    await rpc("tools/call", {
+      name: "register_watch",
+      arguments: {
+        setup_id: "smoke-skill-conflict",
+        symbol: "XAUUSD",
+        direction: "buy",
+        entry: 4414.5,
+        sl: 4400,
+        tp1: 4450,
+        skill_context: { htf_bias: "bearish", conviction: "HIGH", skip_m5_sequence_if: "always" },
+      },
+    })
+  ).result.content[0].text,
+);
+assert(
+  conflicted.skill_context?.fast_lane_available === false,
+  "a context whose bias disagrees with its own setup gets no fast lane",
+);
+assert(
+  Array.isArray(conflicted.skill_context?.fast_lane_refused_because),
+  "and is told exactly why",
+);
+
+const malformed = await rpc("tools/call", {
+  name: "register_watch",
+  arguments: {
+    setup_id: "smoke-skill-bad",
+    symbol: "XAUUSD",
+    direction: "buy",
+    entry: 4414.5,
+    sl: 4400,
+    tp1: 4450,
+    skill_context: { suggested_min_hold_ms: "soon" },
+  },
+});
+assert(Boolean(malformed.error), "a malformed skill context is rejected at validation, not defaulted");
+
+const audit = JSON.parse(
+  (await rpc("tools/call", { name: "get_skill_context_audit" })).result.content[0].text,
+);
+assert(audit.configuration?.hold_floor_ms > 0, "the audit reports the monitor's own bounds");
+assert(
+  audit.active.some((entry) => entry.conviction === "HIGH"),
+  "active watches carrying a context are listed for calibration",
+);
+
+for (const id of [withContext.watch_id, conflicted.watch_id]) {
+  await rpc("tools/call", { name: "cancel_watch", arguments: { watch_id: id } });
+}
+
 console.log("\n— cancellation —");
 const cancelled = JSON.parse(
   (await rpc("tools/call", { name: "cancel_watch", arguments: { watch_id: trapId } })).result

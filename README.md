@@ -1,4 +1,4 @@
-# Watch Monitor MCP — v7.0
+# Watch Monitor MCP — v7.1
 
 An MCP server that monitors ICT sniper setups and `TRAP_NOT_CONFIRMED`
 reads to a deterministic conclusion, notifies a human over Telegram, and
@@ -22,6 +22,7 @@ REGISTERED_WATCH
   → REJECTION_DETECTED               a closed bar took the zone and failed to hold it
   → M5_MSS_CONFIRMED                 a closed M5 bar broke a real pivot against the prior leg
   → DISPLACEMENT_CONFIRMED           that break arrived with a real impulse body
+     (or → M1_CONTINUATION_CONFIRMED  the skill-context fast lane, below)
   → ENTRY_CONFIRMED                  evidence held, kill zone / news / spread gates passed
   → ORDER_SUBMITTED
   → EXECUTED
@@ -56,6 +57,68 @@ and the current stage of every watch is reported as `stage` by
 | `invalidation_rule: "body_close"` + `invalidation_timeframe` | a wick above `4368.31` is not invalidation if the rule says body close. The **stop loss stays a hard price line either way**, so this can never leave a position unprotected |
 | `risk_percent` / `volume` | per-setup sizing overrides |
 | `auto_trade: false` | monitor this setup but never execute it, even while auto-trade is armed |
+| `skill_context` | what the analysis already proved before the touch — see below |
+
+## What the analysis already knows
+
+The analysis skill confirms things this monitor never sees: the HTF
+market-structure shift it read half an hour ago, the trap phase, the
+liquidity it watched get swept, and — the one that costs real time — the
+M5 structure shift that printed *before* price came back to the entry
+zone. Without that, the monitor re-derives the same sequence after the
+touch and confirms five to fifteen minutes behind the move the analyst
+called.
+
+`register_watch` therefore takes an optional `skill_context`. It decides
+**which live proof is required** and **how long it must hold** — never
+that no proof is required:
+
+```jsonc
+"skill_context": {
+  "m5_mss_already_observed": true,      // the claim that makes the M5 sequence a re-derivation
+  "htf_mss_confirmed": true,
+  "liquidity_swept": true,
+  "trap_phase": "delivery",
+  "htf_bias": "bullish",                // cross-checked against direction
+  "conviction": "HIGH",                 // only HIGH can shorten the hold
+  "suggested_min_hold_ms": 15000,       // never below the 15s floor
+  "suggested_max_age_ms": 180000,       // after this the context confers nothing
+  "skip_m5_sequence_if": "m5_mss_already_observed"
+}
+```
+
+When a context asks for it *and* price has moved in the setup's favour
+since the touch, the post-touch M5 sequence is replaced by **M1
+continuation**: an M1 structure shift and an M1 displacement, both on
+bars that closed after the touch. Same obligation, faster clock. On a
+`STRONG_MOVE` with `HIGH` conviction the hold drops to the 15 s floor —
+still with the M1 proof, still with the evidence machine, still behind
+every gate.
+
+Five forward-validation states decide what a context is worth once the
+touch happens:
+
+| State | Meaning | Effect |
+|---|---|---|
+| `WITHIN_ZONE` | nothing decisive yet | standard sequence |
+| `FAVORABLE_EARLY` | ≥ 0.15R in favour | fast lane, pending M1 proof |
+| `STRONG_MOVE` | ≥ 0.5R in favour | fast lane; hold at the floor on HIGH conviction |
+| `STALE` | freshness window closed | fast lane refused, one Telegram message |
+| `FAILED` | ≥ 0.5R against | fast lane and hold shortening both revoked |
+
+Nothing in this path touches safety: stop loss, invalidation, expiry,
+spread, news, kill zone and the price-scale falsification are unchanged
+in every lane. A context whose `htf_bias` disagrees with its own setup
+gets no fast lane at all. Omit `skill_context` and the monitor behaves
+exactly as it did before it existed.
+
+`get_skill_context_audit` scores every claim against what the market then
+did — `skill_said_HIGH_but_failed`, `skill_said_LOW_and_confirmed` — so
+the conviction scale can be calibrated and fast-lane outcomes compared
+against standard-sequence ones before the lane is widened.
+
+Full contract, including what the skill should send and how to read the
+result back: [`docs/skill-context.md`](docs/skill-context.md).
 
 ## Auto-trade
 
@@ -166,13 +229,15 @@ After that:
 ```
 index.js            server, scheduler, both engines, execution driver, MCP + REST surface
 lib/core.mjs        pure logic — scaling, bar discipline, analytics, evidence, entry
-                    sequence, sizing, the pre-submission checklist
+                    sequence, skill context, sizing, the pre-submission checklist
 lib/execution.mjs   upstream tool discovery, schema-driven order payloads, submission
 lib/upstream.mjs    managed cTrader MCP client + coalescing market-data layer
 lib/store.mjs       watch registry + durable atomic snapshot
 lib/notify.mjs      Telegram outbox with retry and delivery accounting
 test/adversarial.test.mjs   the 25 required attack scenarios
 test/execution.test.mjs     the entry sequence, sizing, checklist and payload construction
+test/skill-context.test.mjs the skill-context fast lane and the guardrails around it
+docs/skill-context.md       the contract the analysis skill fills in
 test/smoke.mjs              boots the real server against a fake upstream, twice
 test/smoke-autotrade.mjs    drives a scripted setup all the way to a placed order
 ```
@@ -234,6 +299,18 @@ a complete confirmation sequence, can ask the broker for a position.
 | `ENTRY_MSS_SWING_STRENGTH` | `2` | bars either side that make a pivot a pivot |
 | `ENTRY_FADE_ATR_FRACTION` | `0.5` | how far outside the zone price may drift before the sequence resets |
 
+### Skill context
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SKILL_CONTEXT_ENABLED` | `true` | `false` still records and audits contexts, but lets none of them change anything |
+| `SKILL_CONTEXT_FAST_LANE_ENABLED` | `true` | `false` keeps hold tuning but always requires the M5 sequence |
+| `SKILL_CONTEXT_MIN_HOLD_FLOOR_MS` | `15000` | the shortest hold any context can buy; floor of `5000` |
+| `SKILL_CONTEXT_M1_MIN_BARS` | `2` | closed M1 bars required since the touch before continuation can be proven |
+| `SKILL_CONTEXT_FAVORABLE_R` | `0.15` | `FAVORABLE_EARLY` threshold, in entry-to-invalidation multiples |
+| `SKILL_CONTEXT_STRONG_R` | `0.5` | `STRONG_MOVE` threshold |
+| `SKILL_CONTEXT_ADVERSE_R` | `0.5` | `FAILED` threshold |
+
 ### Auto-trade
 
 | Variable | Default | Notes |
@@ -269,6 +346,7 @@ a complete confirmation sequence, can ask the broker for a position.
   includes auto-trade arming state and today's trade count.
 - `POST /register_watch`, `/register_trap_watch` — REST mirrors that share
   the exact tool code path, so the two surfaces cannot drift.
+- `GET /skill_context_audit` — the same, for the skill-context audit.
 - `GET /test-telegram`, `/test-news`.
 
 ## Deploying
