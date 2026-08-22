@@ -1,0 +1,30 @@
+# cTrader MCP Server — Python requirements
+# Për Railway deployment
+
+# MCP SDK
+mcp>=0.9.0
+
+# gRPC për cTrader Open API
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.0
+
+# cTrader proto stubs (vendosen lokalisht)
+#ctrader-open-api==1.0.0  # Nëse ekziston në PyPI
+
+# Async support
+asyncio-mqtt>=0.16.0
+aiohttp>=3.9.0
+websockets>=12.0
+
+# Data validation
+pydantic>=2.0.0
+pyyaml>=6.0
+
+# Time
+python-dateutil>=2.8.0
+pytz>=2023.3
+
+# HTTP server (për health check + optional HTTP transport)
+uvicorn>=0.25.0
+starlette>=0.30.0

@@ -1,0 +1,281 @@
+# MCP Configuration — ict-sniper-liquidity-engine
+# ==================================================
+# Optimized për: CTrader Watch Monitor MCP
+# Burimi: screenshots nga Gemini Custom Apps
+# Tools totale: 14
+# Naming convention: snake_case (underscores, jo dots)
+
+# ============================================================
+# 1 · TOOL MAPPING (vendos emrat ekzaktë të tools)
+# ============================================================
+# ⛔ MOS NDRYSHO — këta janë emrat zyrtarë të CTrader Watch Monitor MCP
+# Lër bosh "" për të përdorur emrin default
+
+tools:
+  # Time tools
+  time_now: ""                              # default: "time.now"
+
+  # Market data tools
+  market_get_quote: "get_spot_prices"        # CTrader: get_spot_prices
+  market_get_candles: "get_trendbars"        # CTrader: get_trendbars
+  market_get_atr: "computed"                # Llogaritet nga trendbars
+  market_get_spread: "computed"             # Llogaritet nga spot prices
+  market_get_symbols: "get_symbols"         # CTrader: get_symbols
+
+  # Calendar tools
+  calendar_upcoming: "get_news_calendar"    # CTrader: get_news_calendar
+  news_lockout_set: "set_news_lockout"      # CTrader: set_news_lockout
+  news_lockout_clear: "clear_news_lockout"  # CTrader: clear_news_lockout
+
+  # Watch tools (event-driven)
+  watch_register: "register_watch"          # CTrader: register_watch
+  watch_unregister: "cancel_watch"          # CTrader: cancel_watch
+  watch_list: "list_watches"                # CTrader: list_watches
+
+  # Trap watch (i ri, i veçantë për këtë MCP)
+  trap_watch_register: "register_trap_watch"  # CTrader: register_trap_watch
+
+  # Auto-trade management
+  auto_trade_status: "get_auto_trade_status"  # CTrader: get_auto_trade_status
+  auto_trade_pause: "pause_auto_trade"        # CTrader: pause_auto_trade
+  auto_trade_resume: "resume_auto_trade"      # CTrader: resume_auto_trade
+
+  # Utility
+  get_version: "get_version"                # CTrader: get_version
+
+# ============================================================
+# 2 · MCP SERVER CONFIGURATION
+# ============================================================
+server:
+  # Endpoint i MCP server-it (Railway deployment yt)
+  endpoint: ""                              # Shembull: "https://your-mcp.up.railway.app"
+  # Auth token nëse kërkohet
+  auth_token: ""
+  # Timeout (ms) — cTrader API mund të jetë e ngadalshme
+  timeout_ms: 10000
+  # Retry policy
+  max_retries: 3
+  retry_delay_ms: 1000
+
+# ============================================================
+# 3 · TOOL DISCOVERY (zbulim automatik)
+# ============================================================
+discovery:
+  enabled: true
+  list_endpoint: "list_tools"                # Nëse MCP yt ka list_tools
+  fallback_to_defaults: true
+
+# ============================================================
+# 4 · EVENT-DRIVEN WATCH (opsionale)
+# ============================================================
+watch:
+  enabled: true
+  # Event types që dëshiron të marrësh
+  subscribe_to:
+    - "trap.detected"             # trap konfirmohet
+    - "trap.completed"            # trap përfundon
+    - "liquidity.swept"           # liquidity pool swept
+    - "mss.confirmed"             # MSS konfirmohet
+    - "fvg.formed"                # FVG formohet
+    - "session.changed"           # sesioni ndryshon
+    - "kill_zone.entered"         # Kill Zone fillon
+    - "kill_zone.exited"          # Kill Zone mbaron
+    - "macro.entered"             # Macro fillon
+    - "news.upcoming"             # News event
+    - "price.reached"             # Çmimi arrin nivel
+    - "time_distortion.start"     # Time Distortion fillon
+    - "time_distortion.end"       # Time Distortion mbaron
+  polling_fallback: true
+  polling_interval_sec: 5
+
+# ============================================================
+# 5 · NEWS LOCKOUT (i ri)
+# ============================================================
+# CTrader Watch Monitor ka tools të dedikuara për news lockout.
+# Kur aktiv, MCP ndërpret automatikisht tregtinë gjatë lajmeve.
+news_lockout:
+  enabled: true
+  # Lajme që bllokojnë tregtinë
+  block_on_impact:
+    - "high"                    # Vetëm high-impact
+    # ose "medium" për të bllokuar edhe medium
+  # Koha para news që fillojnë të bllokohen (minuta)
+  pre_news_block_minutes: 5
+  # Koha pas news që vazhdojnë të bllokohen
+  post_news_block_minutes: 15
+  # Simbole të ndjeshme (default: lista kryesore)
+  affected_symbols: ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "BTCUSD", "ETHUSD"]
+  # Auto-clear pas news-it
+  auto_clear: true
+
+# ============================================================
+# 6 · AUTO-TRADE MANAGEMENT
+# ============================================================
+# ⛔ AKTIVIZO VETËM NËSE PËRDORESI E KONFIRMON
+registration:
+  auto_register_setups: false               # ⛔ MBANI OFF
+  auto_register_alerts: true                # ✅ alerts të sigurt
+  register_on_conviction:
+    - "A"
+  risk_per_trade_pct: 1.0
+  max_positions: 3
+  max_daily_loss_pct: 5.0
+
+# Kill switch — ndërpret menjëherë gjithçka
+kill_switch:
+  enabled: true
+  triggers:
+    daily_loss_exceeded: 5.0               # % e account
+    max_positions_reached: true
+    news_lockout_active: true               # Ndërprit gjatë news
+    kill_zone_inactive: true                # Ndërprit jashtë Kill Zone
+  # Auto-pause kur trigger aktivizohet
+  auto_pause: true
+  # Auto-resume kur trigger çaktivizohet
+  auto_resume: false                        # Manual resume
+
+# ============================================================
+# 7 · INSTRUMENT-SPECIFIC OVERRIDES
+# ============================================================
+instruments:
+  XAUUSD:
+    tick_size: 0.01
+    pip_value: 0.01
+    contract_size: 100
+    min_lot: 0.01
+    max_lot: 100.0
+    session_priority: ["London", "NY_AM", "NY_PM", "Asia"]
+    news_sensitive: true
+
+  XAGUSD:
+    tick_size: 0.001
+    pip_value: 0.001
+    contract_size: 5000
+    min_lot: 0.01
+    max_lot: 50.0
+    session_priority: ["London", "NY_AM", "NY_PM", "Asia"]
+    news_sensitive: true
+
+  EURUSD:
+    tick_size: 0.00001
+    pip_value: 0.0001
+    contract_size: 100000
+    min_lot: 0.01
+    max_lot: 100.0
+    session_priority: ["London", "NY_AM", "NY_PM", "Asia"]
+    news_sensitive: true
+
+  GBPUSD:
+    tick_size: 0.00001
+    pip_value: 0.0001
+    contract_size: 100000
+    min_lot: 0.01
+    max_lot: 100.0
+    session_priority: ["London", "NY_AM", "NY_PM", "Asia"]
+    news_sensitive: true
+
+  USDJPY:
+    tick_size: 0.001
+    pip_value: 0.01
+    contract_size: 100000
+    min_lot: 0.01
+    max_lot: 100.0
+    session_priority: ["London", "NY_AM", "NY_PM", "Asia"]
+    news_sensitive: true
+
+  BTCUSD:
+    tick_size: 0.01
+    pip_value: 0.01
+    contract_size: 1
+    min_lot: 0.001
+    max_lot: 10.0
+    large_range_day_protocol: true
+    session_priority: ["NY_AM", "NY_PM", "London", "Asia"]
+    news_sensitive: false
+
+  ETHUSD:
+    tick_size: 0.01
+    pip_value: 0.01
+    contract_size: 1
+    min_lot: 0.001
+    max_lot: 100.0
+    session_priority: ["NY_AM", "NY_PM", "London", "Asia"]
+    news_sensitive: false
+
+  US30:
+    tick_size: 0.1
+    pip_value: 0.1
+    contract_size: 1
+    min_lot: 0.1
+    max_lot: 100.0
+    session_priority: ["NY_AM", "NY_PM", "London"]
+    news_sensitive: true
+
+  NAS100:
+    tick_size: 0.1
+    pip_value: 0.1
+    contract_size: 1
+    min_lot: 0.1
+    max_lot: 100.0
+    session_priority: ["NY_AM", "NY_PM", "London"]
+    news_sensitive: true
+
+# ============================================================
+# 8 · CACHE & PERFORMANCE
+# ============================================================
+cache:
+  candles:
+    M1: 60
+    M2: 60
+    M3: 60
+    M5: 300
+    M15: 900
+    M30: 1800
+    H1: 3600
+    H4: 3600
+    D1: 3600
+    W1: 86400
+  spot_prices: 1                # sekonda
+  atr: 300
+  news_calendar: 3600          # 1 orë
+
+# ============================================================
+# 9 · NOTIFICATIONS
+# ============================================================
+notifications:
+  on_setup_a_plus: true
+  on_setup_b: false
+  on_collect: true
+  on_sweep: true
+  on_mss: true
+  on_kill_zone_change: true
+  on_news_lockout: true        # i ri
+  on_news_warning: true        # 5 min para news
+  on_auto_trade_pause: true
+  on_auto_trade_resume: true
+  on_trap_watch_event: true
+  channels: ["console"]
+
+# ============================================================
+# 10 · TOOL ALIASES (për discovery)
+# ============================================================
+# Nëse MCP yt përdor emra të ndryshëm, shtoji këtu.
+# Shembull: nëse ke "get_prices" në vend të "get_spot_prices", vendos:
+#   aliases:
+#     market_get_quote: "get_prices"
+aliases:
+  time_now: ["time.now", "get_server_time", "now", "current_time"]
+  market_get_quote: ["get_spot_prices", "get_prices", "spot", "quote"]
+  market_get_candles: ["get_trendbars", "get_candles", "get_bars", "ohlcv"]
+  market_get_symbols: ["get_symbols", "list_symbols", "symbols"]
+  watch_register: ["register_watch", "watch.create", "subscribe"]
+  watch_unregister: ["cancel_watch", "watch.cancel", "unsubscribe"]
+  watch_list: ["list_watches", "watch.list", "subscriptions"]
+  trap_watch_register: ["register_trap_watch", "trap_watch.create"]
+  calendar_upcoming: ["get_news_calendar", "news_calendar", "upcoming_events"]
+  news_lockout_set: ["set_news_lockout", "news.lockout.set"]
+  news_lockout_clear: ["clear_news_lockout", "news.lockout.clear"]
+  auto_trade_status: ["get_auto_trade_status", "auto_trade.status"]
+  auto_trade_pause: ["pause_auto_trade", "auto_trade.pause"]
+  auto_trade_resume: ["resume_auto_trade", "auto_trade.resume"]
+  get_version: ["get_version", "version"]

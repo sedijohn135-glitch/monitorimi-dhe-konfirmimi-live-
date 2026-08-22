@@ -240,7 +240,16 @@ test/skill-context.test.mjs the skill-context fast lane and the guardrails aroun
 docs/skill-context.md       the contract the analysis skill fills in
 test/smoke.mjs              boots the real server against a fake upstream, twice
 test/smoke-autotrade.mjs    drives a scripted setup all the way to a placed order
+skill/                      the ICT Sniper Liquidity Engine analysis skill that fills it
 ```
+
+The `skill/` directory holds the analysis skill itself — the thing that runs in
+Gemini Spark and calls `register_watch`. It lives here so both halves of the
+`skill_context` contract are versioned together: when the monitor's schema
+changes, the skill that fills it changes in the same commit. `skill/SKILL.md`
+§15.5 is the skill-side rule, and `skill/scripts/mcp_discovery.py` reads the
+monitor's own `inputSchema` from `tools/list` to report which fields *this*
+deployment accepts — so an older monitor is detected rather than assumed.
 
 `lib/core.mjs` performs no I/O and reads no environment at call time.
 That is what makes the suites meaningful: they drive the same functions
