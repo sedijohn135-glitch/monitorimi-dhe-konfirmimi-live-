@@ -198,6 +198,24 @@ const tools = await rpc("tools/list", {});
 const names = tools.result.tools.map((tool) => tool.name);
 assert(names.includes("get_trendbars"), "market-data tools are exposed");
 assert(!names.includes("get_balance"), "account tools are filtered out of tools/list");
+assert(names.includes("get_setup_trail"), "the event trail is exposed to the client");
+
+// The skill discovers what this deployment accepts by reading this exact
+// schema (skill/scripts/mcp_discovery.py). If the two drift, the skill
+// silently stops sending fields the monitor needs.
+const registerSchema =
+  tools.result.tools.find((tool) => tool.name === "register_watch")?.inputSchema?.properties || {};
+for (const field of [
+  "potential_trade_sl",
+  "thesis_invalidation",
+  "defence_profile",
+  "urgency",
+  "max_entry_deviation",
+  "confirmation_deadline_minutes",
+  "entry_monitoring_window_minutes",
+]) {
+  assert(Boolean(registerSchema[field]), `register_watch advertises ${field}`);
+}
 assert(!names.includes("create_order"), "execution tools are filtered out of tools/list");
 assert(names.includes("register_trap_watch"), "monitor tools are exposed");
 
@@ -277,15 +295,52 @@ assert(Boolean(recovered), "the watch survived the restart");
 assert(recovered?.recovered === true, "it is flagged as recovered");
 assert(recovered?.entryTouched === true, "the entry touch survived; it is a market fact");
 
-console.log("\n— safety after restart —");
-price = 4399; // drive straight through the stop
+console.log("\n— anti-SL: a shallow excursion is classified, not assumed —");
+price = 4399; // just through the stop, and it stays there
+await sleep(5000);
+const afterExcursion = JSON.parse(
+  (await rpc("tools/call", { name: "list_watches" })).result.content[0].text,
+);
+const excursed = afterExcursion.active.find((watch) => watch.id === watchId);
+assert(
+  excursed?.stage === "ANTI_SL_EVALUATION",
+  `price at the stop before entry opens the anti-SL branch (${excursed?.stage})`,
+);
+assert(
+  !afterExcursion.recent.some((record) => record.id === watchId),
+  "and does not resolve the setup: no trade was entered, so nothing was stopped out",
+);
+assert(
+  excursed?.slExcursion?.active === true && excursed?.slExcursion?.maxDepth > 0,
+  "the excursion is measured, not just noticed",
+);
+
+const trailBefore = JSON.parse(
+  (await rpc("tools/call", { name: "get_setup_trail", arguments: { watch_id: watchId } })).result
+    .content[0].text,
+);
+assert(
+  trailBefore.trail.some((event) => event.type === "sl_excursion_started"),
+  "the excursion is on the setup's event trail",
+);
+assert(
+  trailBefore.trail.every((event) => event.event_id && event.correlation_id && event.at),
+  "every trail event carries an id, a correlation id and a timestamp",
+);
+
+console.log("\n— anti-SL: a deep excursion is a real invalidation —");
+price = 4380; // far beyond the stop, on any reading of the volatility
 await sleep(5000);
 const afterStop = JSON.parse(
   (await rpc("tools/call", { name: "list_watches" })).result.content[0].text,
 );
 const resolution = afterStop.recent.find((record) => record.id === watchId);
 assert(Boolean(resolution), "the watch resolved");
-assert(resolution?.status === "FAILED", `SL breach resolved FAILED (${resolution?.status})`);
+assert(resolution?.status === "FAILED", `a deep excursion resolved FAILED (${resolution?.status})`);
+assert(
+  /risk boundary/i.test(resolution?.reason || ""),
+  `and says it was the anti-SL branch that killed it (${resolution?.reason})`,
+);
 
 console.log("\n— scale integrity —");
 const trap = await rpc("tools/call", {

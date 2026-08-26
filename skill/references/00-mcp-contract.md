@@ -119,6 +119,35 @@ Mungesa e skemës **nuk** do të thotë mungesë mbështetjeje — prandaj `unkn
 Kontrata e plotë e fushave, kufijtë dhe si i përdor monitori →
 [SKILL.md §15.5](../SKILL.md) dhe `docs/skill-context.md` te repo-ja e monitorit.
 
+### 1.8 · Setup Lifecycle (v7.2+)
+
+```
+SETUP LIFECYCLE (Watch Monitor MCP v7.2+):
+  - watch.register pranon: potential_trade_sl / thesis_invalidation,
+                           defence_profile, urgency, max_entry_deviation,
+                           confirmation_deadline_minutes,
+                           entry_monitoring_window_minutes
+  - watch.trail  (get_setup_trail)
+```
+
+Zbulimi vlen njësoj si te §1.7: fushat lexohen nga `inputSchema`, dhe nëse
+`defence_profile` nuk është aty, monitori është < v7.2 — atëherë **mos i
+dërgo** fushat e reja dhe sillu si më parë.
+
+Dy gjëra që ndryshojnë sjelljen e monitorit dhe që duhet t'i di përpara se
+të regjistroj një setup:
+
+1. **`potential_trade_sl` ≠ `thesis_invalidation`.** Para hyrjes, prekja e
+   stop-it **nuk** e vret setup-in — hap degën Anti-SL. Vetëm një
+   `thesis_invalidation` i deklaruar dhe i thyer e vret menjëherë. Nëse
+   dërgoj vetëm një numër, monitori e lexon si stop.
+2. **`ENTRY_MISSED` është gjendje më vete.** Çmimi që shkon në TP1 pa hyrje,
+   ose një konfirmim që vjen shumë larg entry-t, e mbyllin mundësinë pa e
+   quajtur setup-in të gabuar — dhe pa e ndjekur çmimin.
+
+Kontrata e plotë → [SKILL.md §15.6](../SKILL.md) dhe
+`docs/setup-lifecycle.md` te repo-ja e monitorit.
+
 ---
 
 ## 2 · EVENT-DRIVEN WATCH (Pattern i Ri)

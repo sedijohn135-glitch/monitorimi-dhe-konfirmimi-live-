@@ -51,14 +51,19 @@ import "dotenv/config";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
+  ANTI_SL_DEFAULTS,
+  DEFENCE_PROFILES,
   PERIOD_MS,
   SKILL_CONTEXT_CONDITIONS,
   SKILL_CONTEXT_LIMITS,
   SKILL_CONVICTIONS,
   SKILL_TRAP_PHASES,
   TRAP_TIMEFRAMES,
+  URGENCIES,
   advanceEntrySequence,
   advanceGeneration,
+  advanceSlExcursion,
+  appendTrail,
   applySkillContext,
   barClosedAfter,
   barKey,
@@ -73,12 +78,18 @@ import {
   classifyWick,
   closedSeries,
   computeOrderVolume,
+  defenceSatisfied,
   displacementCheck,
+  emptyExcursion,
   emptySequence,
   entryZone,
+  evaluateAntiSl,
   evaluateConfirmation,
+  evaluateEntryOpportunity,
   evaluatePrerequisite,
   evaluateSafety,
+  evaluateTimeWindow,
+  evaluateTradeProgress,
   finiteNumber,
   formatLevel,
   forwardValidationState,
@@ -94,9 +105,12 @@ import {
   skillContextAudit,
   stageOf,
   summariseSkillContextAudits,
+  tradeTargets,
+  trailEvent,
   symbolCurrencies,
   trapWatchKey,
   updateSpreadHealth,
+  urgencyHoldMs,
   validateTrapWatchInput,
   validateWatchInput,
   verifyM1Continuation,
@@ -212,6 +226,49 @@ const CONFIG = {
     adverseR: num(process.env.SKILL_CONTEXT_ADVERSE_R, 0.5, 0.1),
   },
 
+  // §14/§19 Entry opportunity. A confirmation that arrives with price
+  // far from the planned entry is a different trade; these decide how
+  // far is far, in the setup's own terms rather than in points.
+  entryDeviationAtrFraction: num(process.env.ENTRY_DEVIATION_ATR_FRACTION, 0.75, 0.05),
+  entryDeviationRiskFraction: num(process.env.ENTRY_DEVIATION_RISK_FRACTION, 0.3, 0.05),
+  // The floor on what is left of the setup's reward-to-risk *at the fill*,
+  // not at the planned entry. It is deliberately below the 1R that
+  // registration demands, because this engine does not enter at the
+  // planned entry by design: `checkAcceptance` requires price to travel
+  // up to 0.35 of the risk distance beyond entry before it will confirm
+  // at all. A 1R floor here would therefore refuse the very entries the
+  // confirmation rules are built to produce — the two requirements would
+  // contradict each other on any setup under about 1.5R. 0.5 is the
+  // boundary that permits the acceptance travel the engine requires and
+  // refuses anything worse than it. The deviation cap above is the
+  // primary guard against chasing; this one catches a collapsed R:R.
+  entryMinRemainingRR: num(process.env.ENTRY_MIN_REMAINING_RR, 0.5, 0.1),
+
+  // §20 The confirmation clock. Absent a per-setup deadline the setup's
+  // own expiry is the only boundary, exactly as before.
+  confirmationDeadlineMinutes: num(process.env.CONFIRMATION_DEADLINE_MINUTES, 0, 0),
+
+  // §10/§15 Anti-SL-Hunter. The branch is on by default; turning it off
+  // restores the previous behaviour, where price reaching the stop before
+  // entry killed the setup outright.
+  antiSl: {
+    enabled: process.env.ANTI_SL_ENABLED !== "false",
+    wickDepthAtr: num(process.env.ANTI_SL_WICK_DEPTH_ATR, ANTI_SL_DEFAULTS.wickDepthAtr, 0.05),
+    maxDepthAtr: num(process.env.ANTI_SL_MAX_DEPTH_ATR, ANTI_SL_DEFAULTS.maxDepthAtr, 0.1),
+    wickDepthRisk: num(process.env.ANTI_SL_WICK_DEPTH_RISK, ANTI_SL_DEFAULTS.wickDepthRisk, 0.01),
+    maxDepthRisk: num(process.env.ANTI_SL_MAX_DEPTH_RISK, ANTI_SL_DEFAULTS.maxDepthRisk, 0.05),
+    wickDurationMs: num(process.env.ANTI_SL_WICK_DURATION_MS, ANTI_SL_DEFAULTS.wickDurationMs, 30_000),
+    maxDurationMs: num(process.env.ANTI_SL_MAX_DURATION_MS, ANTI_SL_DEFAULTS.maxDurationMs, 60_000),
+    reclaimHoldMs: num(process.env.ANTI_SL_RECLAIM_HOLD_MS, ANTI_SL_DEFAULTS.reclaimHoldMs, 10_000),
+    fastAtrPerMinute: num(process.env.ANTI_SL_FAST_ATR_PER_MIN, ANTI_SL_DEFAULTS.fastAtrPerMinute, 0.1),
+    maxEvaluationMs: num(process.env.ANTI_SL_MAX_EVALUATION_MS, ANTI_SL_DEFAULTS.maxEvaluationMs, 60_000),
+  },
+
+  // §33 Post-entry. The trade record that outlives the setup.
+  tradeTrackingEnabled: process.env.TRADE_TRACKING_ENABLED !== "false",
+  tradeIntervalMs: num(process.env.TRADE_WATCH_INTERVAL_MS, 10000, 3000),
+  maxTradeWatches: num(process.env.MAX_TRADE_WATCHES, 10, 1),
+
   autoTrade: autoTradeConfig(),
 };
 
@@ -309,7 +366,14 @@ export function autoTradeStatus(config = CONFIG.autoTrade) {
 // Degradation must be measured against the watch's own cadence, not a
 // fixed wall-clock constant, or a slow trap watch reports itself broken.
 const staleBudget = (watch) =>
-  Math.max(120_000, (watch.kind === "TRAP" ? CONFIG.trapIntervalMs : CONFIG.setupIntervalMs) * 8);
+  Math.max(
+    120_000,
+    (watch.kind === "TRAP"
+      ? CONFIG.trapIntervalMs
+      : watch.kind === "TRADE"
+        ? CONFIG.tradeIntervalMs
+        : CONFIG.setupIntervalMs) * 8,
+  );
 
 function log(message, ...args) {
   console.error(`[watch-monitor] ${message}`, ...args);
@@ -341,6 +405,7 @@ const store = new WatchStore({
   limits: {
     setups: CONFIG.maxSetupWatches,
     traps: CONFIG.maxTrapWatches,
+    trades: CONFIG.maxTradeWatches,
     resolved: CONFIG.resolvedLimit,
   },
 });
@@ -398,18 +463,37 @@ function scheduleSave(immediate = false) {
 // RESOLVING — but the delivery outcome is recorded against the
 // resolution so a silent non-delivery is visible in list_watches.
 
+/**
+ * §35 — the setup's own ordered record of what happened to it. It lives
+ * on the watch, so it is persisted with the watch, survives a restart
+ * with it, and is handed back by `get_setup_trail` and in the resolution
+ * record. Bounded, because it is written to disk on every save.
+ */
+function record(watch, type, detail = null, nowMs = Date.now()) {
+  if (!watch) return null;
+  const event = trailEvent(watch, type, detail, nowMs);
+  watch.trail = appendTrail(watch.trail, event);
+  store.dirty = true;
+  return event;
+}
+
 function resolveWatch(watch, status, extra = {}, message = null, priority = "critical") {
   if (!store.beginResolution(watch.id)) return false;
   try {
+    record(watch, "final_outcome", { status, reason: extra.reason ?? null });
     // Every terminal transition already funnels through here, which
     // makes it the one place the skill's claims can be scored against
     // what the market actually did — without a second call site that
     // could be forgotten on a new resolution path.
     const audit = skillContextAudit(watch, status);
-    const record = store.finalize(watch, status, audit ? { ...extra, skill_context_audit: audit } : extra);
+    const resolution = store.finalize(
+      watch,
+      status,
+      audit ? { ...extra, skill_context_audit: audit } : extra,
+    );
     if (message) {
       const result = notify(message, { dedupeKey: `${watch.id}:${status}`, priority });
-      record.notification = { queued: result.queued, at: new Date().toISOString() };
+      resolution.notification = { queued: result.queued, at: new Date().toISOString() };
     }
     scheduleSave(true);
     return true;
@@ -515,7 +599,7 @@ function entryEvidenceSummary(watch) {
 function executedWatch(watch, execution) {
   const direction = watch.direction === "buy" ? "LONG" : "SHORT";
   const evidence = entryEvidenceSummary(watch);
-  return resolveWatch(
+  const resolved = resolveWatch(
     watch,
     "EXECUTED",
     { resolvedPrice: execution.price, execution, signals: watch.lastSignals || [] },
@@ -524,6 +608,8 @@ function executedWatch(watch, execution) {
       `<b>Execution:</b> ${htmlEscape(formatLevel(execution.price))} on ${htmlEscape(watch.symbol)}\n` +
       executionLogLines(watch, execution).join("\n"),
   );
+  if (resolved) openTradeFor(watch, execution.price, execution.dryRun ? "dry_run" : "auto_execution");
+  return resolved;
 }
 
 /**
@@ -532,7 +618,7 @@ function executedWatch(watch, execution) {
  * exact reason the automated path stood down.
  */
 function confirmedNotExecutedWatch(watch, price, result, gates, refusal) {
-  return resolveWatch(
+  const resolved = resolveWatch(
     watch,
     "CONFIRMED",
     {
@@ -555,6 +641,10 @@ function confirmedNotExecutedWatch(watch, price, result, gates, refusal) {
       `<i>The setup is confirmed. The order was not placed.</i>`,
     "critical",
   );
+  // Still an actionable ENTER NOW for the human, so the trade it produces
+  // is still worth tracking.
+  if (resolved) openTradeFor(watch, price, "manual_after_auto_stood_down");
+  return resolved;
 }
 
 /**
@@ -578,6 +668,18 @@ function executionUnknownWatch(watch, detail) {
   );
 }
 
+function notifyExcursion(watch, price) {
+  notify(
+    `<b>POTENTIAL SL EXCURSION — NO TRADE IS OPEN</b>\n` +
+      `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(watch.direction.toUpperCase())}\n` +
+      `<b>Stop line:</b> ${htmlEscape(formatLevel(watch.sl))} | ` +
+      `<b>Price:</b> ${htmlEscape(formatLevel(price))}\n` +
+      `<i>Nothing was entered, so nothing was stopped out. Classifying the ` +
+      `excursion before deciding whether the thesis survived. No entry until it resolves.</i>`,
+    { dedupeKey: `${watch.id}:excursion:${watch.slExcursion?.count ?? 1}` },
+  );
+}
+
 function failWatch(watch, price, reason) {
   return resolveWatch(
     watch,
@@ -587,6 +689,52 @@ function failWatch(watch, price, reason) {
       `<b>Symbol:</b> ${htmlEscape(watch.symbol)} (${htmlEscape(watch.direction)})\n` +
       `<b>Reason:</b> ${htmlEscape(reason)}\n` +
       `<b>Price:</b> ${htmlEscape(formatLevel(price))}\n<b>Action:</b> Do not enter.`,
+  );
+}
+
+/**
+ * §18/§19 — the thesis was fine and the entry is gone. Reporting this as
+ * an expiry loses the distinction §5 exists to protect, and reporting it
+ * as an invalidation would be simply false: the setup was right.
+ *
+ * There is no chase here by construction — this is a terminal state, and
+ * the only way back to this market is a fresh analysis with a new id.
+ */
+function entryMissedWatch(watch, reason, price, detail = {}) {
+  return resolveWatch(
+    watch,
+    "ENTRY_MISSED",
+    { reason, resolvedPrice: price ?? null, ...detail },
+    `<b>ENTRY MISSED</b>\n` +
+      `<b>Symbol:</b> ${htmlEscape(watch.symbol)} (${htmlEscape(watch.direction)})\n` +
+      `<b>Setup ID:</b> ${htmlEscape(watch.setup_id || watch.id)}\n` +
+      `<b>Reason:</b> ${htmlEscape(reason)}\n` +
+      (Number.isFinite(price) ? `<b>Price:</b> ${htmlEscape(formatLevel(price))}\n` : "") +
+      `<b>Entry was:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+      `<i>The thesis may still be right. The entry is not. Do not chase — ` +
+      `re-run the analysis if you want this market.</i>`,
+    "normal",
+  );
+}
+
+/**
+ * §34 — the deterministic rules ran out of road. This is not a verdict
+ * on the market, it is an admission that the monitor cannot settle the
+ * question from live price alone, and the analyst has to look again.
+ */
+function reanalysisRequiredWatch(watch, reason, price, detail = {}) {
+  return resolveWatch(
+    watch,
+    "REANALYSIS_REQUIRED",
+    { reason, resolvedPrice: price ?? null, ...detail },
+    `<b>REANALYSIS REQUIRED</b>\n` +
+      `<b>Symbol:</b> ${htmlEscape(watch.symbol)} (${htmlEscape(watch.direction)})\n` +
+      `<b>Setup ID:</b> ${htmlEscape(watch.setup_id || watch.id)}\n` +
+      `<b>Reason:</b> ${htmlEscape(reason)}\n` +
+      (Number.isFinite(price) ? `<b>Price:</b> ${htmlEscape(formatLevel(price))}\n` : "") +
+      `<b>Action:</b> this setup is closed. Run a fresh analysis; anything it produces ` +
+      `is a new setup with a new id, not this one revived.`,
+    "normal",
   );
 }
 
@@ -881,46 +1029,31 @@ const SMT_BUNDLES = {
  * collapses to "standard sequence, standard hold" whenever no context
  * was sent, the context has expired, or price went the wrong way.
  */
-function decideSkillContext(watch, { mid, zone, m1Bars, touchedAtMs, nowMs }) {
+function decideSkillContext(watch, { forward, m1Continuation, baseHoldMs, nowMs }) {
   const context = watch.skill_context || null;
   const base = {
     lane: "STANDARD",
-    holdMs: CONFIG.minConfirmationHoldMs,
+    holdMs: baseHoldMs,
     requireSequence: CONFIG.entrySequenceRequired,
-    forwardState: null,
+    forwardState: forward?.state ?? null,
+    forward,
+    m1Continuation,
     eligible: false,
     reasons: [],
     blocked: [],
+    baseHoldMs,
+    updatedAt: new Date(nowMs).toISOString(),
   };
   if (!context || !CONFIG.skillContext.enabled) return base;
 
   const contextAgeMs = skillContextAgeMs(context, nowMs);
-  const forward = forwardValidationState(watch, {
-    mid,
-    zone,
-    nowMs,
-    touchedAtMs,
-    contextAgeMs,
-    maxAgeMs: context.suggested_max_age_ms ?? SKILL_CONTEXT_LIMITS.defaultMaxAgeMs,
-    thresholds: {
-      favorableR: CONFIG.skillContext.favorableR,
-      strongR: CONFIG.skillContext.strongR,
-      adverseR: CONFIG.skillContext.adverseR,
-    },
-  });
-  const m1Continuation = verifyM1Continuation(m1Bars, watch.direction, touchedAtMs, {
-    strength: CONFIG.entryMssSwingStrength,
-    displacementMultiple: CONFIG.entryDisplacementMultiple,
-    displacementLookback: CONFIG.entryDisplacementLookback,
-    minBarsAfterTouch: CONFIG.skillContext.m1MinBarsAfterTouch,
-  });
   const decision = applySkillContext(
     context,
     { forwardState: forward.state, m1Continuation },
     {
       enabled: CONFIG.skillContext.enabled,
       fastLaneEnabled: CONFIG.skillContext.fastLaneEnabled,
-      minHoldMs: CONFIG.minConfirmationHoldMs,
+      minHoldMs: baseHoldMs,
       holdFloorMs: CONFIG.skillContext.holdFloorMs,
       sequenceRequired: CONFIG.entrySequenceRequired,
     },
@@ -930,7 +1063,7 @@ function decideSkillContext(watch, { mid, zone, m1Bars, touchedAtMs, nowMs }) {
     forward,
     m1Continuation,
     contextAgeMs,
-    baseHoldMs: CONFIG.minConfirmationHoldMs,
+    baseHoldMs,
     updatedAt: new Date(nowMs).toISOString(),
   };
 }
@@ -1063,22 +1196,98 @@ async function tickSetupWatch(watch) {
     tolerance,
     touchLevel: zoneTouchLevel(watch, tolerance),
     invalidationConfirmed: rules.invalidationConfirmed === true,
+    antiSlEnabled: CONFIG.antiSl.enabled,
   });
+  // §30 — ordering is fixed and stated, so a tick that carries both an
+  // invalidation and something else always resolves the same way.
+  // Invalidation first, then the closing of the entry opportunity, then
+  // the excursion branch, and only then anything that can enter.
   if (safety.action === "FAIL") {
     watch.lastReason = "risk_line_breached";
+    record(watch, "invalidation", { reason: safety.reason, price: safety.price }, now);
     failWatch(watch, safety.price, safety.reason);
     return;
   }
-  if (safety.action === "EXPIRE") {
-    watch.lastReason = "tp1_reached";
-    expireWatch(watch, safety.reason, safety.price);
+  if (safety.action === "ENTRY_MISSED") {
+    // §18 — price went to the target without us. The thesis was right;
+    // the entry is gone. This is not an expiry and it is not a failure.
+    watch.lastReason = "entry_opportunity_closed";
+    record(watch, "entry_missed", { reason: safety.reason, price: safety.price }, now);
+    entryMissedWatch(watch, safety.reason, safety.price, { entryMissedBy: "tp1_before_entry" });
     return;
+  }
+
+  // -- §15 Anti-SL-Hunter, part one: the excursion record ------------------
+  //
+  // Event-driven (§10): nothing below runs unless price has actually gone
+  // to the stop, and nothing above waited for it to. The record is
+  // maintained here, on every tick, because duration and reclaim can only
+  // be measured by watching; the verdict is passed further down, where the
+  // candles that carry the evidence have been read.
+  const beyondStop = watch.direction === "buy" ? protective <= watch.sl : protective >= watch.sl;
+  const excursionOpen =
+    Number.isFinite(watch.slExcursion?.startedAtMs) && watch.slExcursion.outcome === "PENDING";
+  if (CONFIG.antiSl.enabled && (beyondStop || excursionOpen)) {
+    const wasActive = watch.slExcursion?.active === true;
+    watch.slExcursion = advanceSlExcursion(watch.slExcursion, {
+      beyond: beyondStop,
+      price: protective,
+      depth: Math.abs(protective - watch.sl),
+      nowMs: now,
+    });
+    store.dirty = true;
+    if (!wasActive && watch.slExcursion.active) {
+      // To reach the stop, price crossed the entry zone. The touch is a
+      // market fact whether or not a tick happened to observe it inside
+      // the zone, and the sequence has to be anchored to it.
+      if (!watch.entryTouched) {
+        watch.entryTouched = true;
+        watch.entryTouchedAt = new Date(now).toISOString();
+        watch.entryTouchedAtMs = now;
+        watch.entryTouchPrice = executable;
+        watch.sequence = emptySequence();
+      }
+      watch.lifecycle = "ANTI_SL_EVALUATION";
+      watch.lastReason = "sl_excursion";
+      record(
+        watch,
+        "sl_excursion_started",
+        { price: protective, stop: watch.sl, count: watch.slExcursion.count },
+        now,
+      );
+      notifyExcursion(watch, protective);
+    }
+    // The branch is bounded from outside the evaluation as well as inside
+    // it. An excursion the monitor cannot classify *because it cannot read
+    // the candles* would otherwise sit open forever: unable to invalidate,
+    // unable to survive, and blocking entry the whole time. Past the
+    // evaluation budget it goes back to the analyst either way.
+    if (
+      Number.isFinite(watch.slExcursion.startedAtMs) &&
+      watch.slExcursion.outcome === "PENDING" &&
+      now - watch.slExcursion.startedAtMs > CONFIG.antiSl.maxEvaluationMs
+    ) {
+      watch.slExcursion.outcome = "UNCERTAIN";
+      watch.slExcursion.resolvedAtMs = now;
+      record(watch, "anti_sl_outcome", { outcome: "UNCERTAIN", exhausted: true, reasons: ["the excursion outlived its evaluation budget"] }, now);
+      watch.lastReason = "anti_sl_unresolved";
+      reanalysisRequiredWatch(
+        watch,
+        `the stop excursion was still unclassified after ${Math.round(CONFIG.antiSl.maxEvaluationMs / 60_000)} minutes`,
+        protective,
+        { antiSl: watch.antiSl ?? null, slExcursion: watch.slExcursion },
+      );
+      return;
+    }
   }
 
   // The setup's own prerequisite gates everything downstream of it. An
   // untouched entry cannot be armed, and an unproven prerequisite is not
   // a satisfied one — but the safety checks above still ran, so an
   // adverse move is still caught while the setup waits.
+  if (watch.prerequisiteSatisfied === false && rules.prerequisite.satisfied === true) {
+    record(watch, "setup_prerequisite_satisfied", { detail: rules.prerequisite.detail }, now);
+  }
   watch.prerequisiteSatisfied = rules.prerequisite.satisfied;
   watch.prerequisiteDetail = rules.prerequisite.detail;
   if (!rules.prerequisite.satisfied) {
@@ -1086,6 +1295,30 @@ async function tickSetupWatch(watch) {
       ? "waiting_for_setup_confirmation"
       : "prerequisite_unverifiable";
     noteDataQuality(watch, rules.prerequisite.known, rules.prerequisite.detail);
+    return;
+  }
+
+  // §20 — the confirmation clock, checked before anything that could
+  // confirm. A technical read that completes after the deadline is a read
+  // of a different market than the one the setup was written for.
+  const timeWindow = evaluateTimeWindow(watch, { nowMs: now, killZoneEnabled: false });
+  if (timeWindow.state === "DEADLINE_PASSED") {
+    record(watch, "time_window", { state: timeWindow.state, detail: timeWindow.detail }, now);
+    // §21's mirror image: if the evidence was already complete and only a
+    // gate was holding it, the setup is not stale, the *clock* ran out —
+    // and that is a question for the analyst, not an expiry.
+    if (Number.isFinite(watch.technicalConfirmationAtMs)) {
+      watch.lastReason = "confirmation_deadline_passed";
+      reanalysisRequiredWatch(
+        watch,
+        `the technical read completed but ${timeWindow.detail}`,
+        mid,
+        { timeWindow },
+      );
+    } else {
+      watch.lastReason = "confirmation_deadline_passed";
+      expireWatch(watch, `Confirmation deadline passed: ${timeWindow.detail}`, mid);
+    }
     return;
   }
 
@@ -1098,6 +1331,7 @@ async function tickSetupWatch(watch) {
     watch.lifecycle = "TOUCHED";
     watch.lastReason = "entry_touched";
     store.dirty = true;
+    record(watch, "entry_zone_reached", { price: safety.price, zone: { low: zone.low, high: zone.high } }, now);
     notify(
       `<b>ENTRY TOUCHED</b>\n` +
         `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(watch.direction.toUpperCase())}\n` +
@@ -1113,10 +1347,12 @@ async function tickSetupWatch(watch) {
   }
 
   // -- Evidence -------------------------------------------------------------
+  const fetchStartedAt = Date.now();
   const [m5raw, m1raw] = await Promise.all([
     market.bars(watch.symbol, mainId, "M5", 60),
     market.bars(watch.symbol, mainId, "M1", 80),
   ]);
+  const dataReadyAt = Date.now();
   const m5 = closedSeries(m5raw || [], "M5", { nowMs: now });
   const m1 = closedSeries(m1raw || [], "M1", { nowMs: now, staleBars: 5 });
   if (m5.status !== "OK" || m1.status !== "OK" || m5.bars.length < 20 || m1.bars.length < 20) {
@@ -1181,6 +1417,129 @@ async function tickSetupWatch(watch) {
   }
   noteDataQuality(watch, true);
 
+  // -- §15 Anti-SL-Hunter, part two: the verdict ----------------------------
+  //
+  // Three outcomes, and the middle one is real. What decides between them
+  // is evidence about this excursion — how deep against this instrument's
+  // own volatility, how long, how fast, whether price came back, and above
+  // all whether any bar *closed* beyond the line — never a prior about
+  // what this symbol usually does (§13, §39).
+  //
+  // Every observation is three-valued. Before a bar has closed since the
+  // excursion began, "no closed body beyond the level" is not yet a fact,
+  // so it is reported as unknown and the verdict stays UNCERTAIN. That is
+  // the point: the one thing that most strongly argues a sweep is a bar
+  // that closed back inside, and it cannot be claimed before one has.
+  if (
+    CONFIG.antiSl.enabled &&
+    Number.isFinite(watch.slExcursion?.startedAtMs) &&
+    watch.slExcursion.outcome === "PENDING"
+  ) {
+    const startedAtMs = watch.slExcursion.startedAtMs;
+    const opposing = oppositeBias(watch.direction);
+    const settled = m5.bars.filter((bar) => barClosedAfter(bar, PERIOD_MS.M5, startedAtMs));
+    const lastSettled = barClosedAfter(m5.bars.at(-1), PERIOD_MS.M5, startedAtMs);
+
+    const closedBodyBeyond = settled.length
+      ? settled.some((bar) => bodyClosedBeyond(bar, watch.sl, opposing))
+      : null;
+    const opposingStructureBreak = settled.length
+      ? checkMSS(m5.bars, opposing, PERIOD_MS.M5, startedAtMs, {
+          strength: CONFIG.entryMssSwingStrength,
+        }).present === true
+      : null;
+    const opposingFollowThrough = lastSettled
+      ? displacementCheck(
+          m5.bars,
+          opposing,
+          CONFIG.entryDisplacementMultiple,
+          CONFIG.entryDisplacementLookback,
+        ).present === true
+      : null;
+
+    const verdict = evaluateAntiSl(
+      watch,
+      watch.slExcursion,
+      {
+        atr: atrM5,
+        nowMs: now,
+        closedBodyBeyond,
+        opposingStructureBreak,
+        opposingFollowThrough,
+        withinTimeWindow: timeWindow.state !== "EXPIRED" && timeWindow.state !== "DEADLINE_PASSED",
+        liquiditySwept: watch.skill_context?.liquidity_swept === true,
+        liquidityTarget: watch.skill_context?.liquidity_target ?? null,
+      },
+      CONFIG.antiSl,
+    );
+    watch.antiSl = verdict;
+    store.dirty = true;
+
+    if (verdict.outcome === "INVALIDATED") {
+      // §16 — the old setup is dead now and stays dead. Nothing later,
+      // including price running straight to the original target, reopens
+      // it; a new opportunity is a new analysis with a new id.
+      watch.slExcursion.outcome = "INVALIDATED";
+      watch.slExcursion.resolvedAtMs = now;
+      record(watch, "anti_sl_outcome", { outcome: "INVALIDATED", reasons: verdict.reasons, measured: verdict.measured }, now);
+      watch.lastReason = "anti_sl_invalidated";
+      failWatch(
+        watch,
+        protective,
+        `Thesis invalidated at the risk boundary: ${verdict.reasons[0] || verdict.detail}`,
+      );
+      return;
+    }
+
+    if (verdict.outcome === "SURVIVES") {
+      watch.slExcursion.outcome = "SURVIVES";
+      watch.slExcursion.resolvedAtMs = now;
+      // §15A — surviving is not confirming. The watch goes back to
+      // defence evaluation and has to earn the entry there, on price
+      // action that printed after the reclaim rather than before the
+      // excursion: bars from before it described a market that has since
+      // been through something.
+      watch.sequenceAnchorMs = watch.slExcursion.reclaimedAtMs ?? now;
+      watch.sequence = emptySequence();
+      watch.lifecycle = "TOUCHED";
+      watch.lastReason = "anti_sl_survived";
+      record(watch, "anti_sl_outcome", { outcome: "SURVIVES", reasons: verdict.reasons, measured: verdict.measured }, now);
+      notify(
+        `<b>SL EXCURSION SURVIVED — STILL NO ENTRY</b>\n` +
+          `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(watch.direction.toUpperCase())}\n` +
+          `<b>Evidence:</b> ${htmlEscape(verdict.reasons.join("; "))}\n` +
+          `<i>The setup is back in defence evaluation. It still has to confirm ` +
+          `before anything is entered.</i>`,
+        { dedupeKey: `${watch.id}:excursion:${watch.slExcursion.count}:survived` },
+      );
+    } else {
+      // UNCERTAIN. This is a hard blocker while it lasts, and it does not
+      // last forever — an excursion nobody can classify eventually goes
+      // back to the analyst rather than parking the setup indefinitely.
+      if (verdict.exhausted) {
+        watch.slExcursion.outcome = "UNCERTAIN";
+        watch.slExcursion.resolvedAtMs = now;
+        record(watch, "anti_sl_outcome", { outcome: "UNCERTAIN", exhausted: true, reasons: verdict.reasons }, now);
+        watch.lastReason = "anti_sl_unresolved";
+        reanalysisRequiredWatch(
+          watch,
+          `the stop excursion could not be classified: ${verdict.detail}`,
+          protective,
+          { antiSl: verdict },
+        );
+        return;
+      }
+      watch.lifecycle = "ANTI_SL_EVALUATION";
+      watch.lastReason = "anti_sl_evaluation";
+      const signature = verdict.reasons.join("|");
+      if (watch.antiSlNoted !== signature) {
+        watch.antiSlNoted = signature;
+        record(watch, "anti_sl_evaluation", { reasons: verdict.reasons, measured: verdict.measured }, now);
+      }
+      return;
+    }
+  }
+
   // -- The post-touch entry sequence ----------------------------------------
   //
   // Rejection → M5 structure shift → displacement, each proven on a bar
@@ -1189,9 +1548,16 @@ async function tickSetupWatch(watch) {
   // proves the read persisted under observation, the sequence proves it
   // is the read the setup actually described.
   const lastM5 = m5.bars.at(-1);
-  const touchedAtMs =
+  const rawTouchedAtMs =
     finiteNumber(watch.entryTouchedAtMs) ??
     (watch.entryTouchedAt ? Date.parse(watch.entryTouchedAt) : null);
+  // Proof has to post-date the touch — and, where an excursion has been
+  // through here and survived, the reclaim rather than the touch. Bars
+  // from before the excursion describe a market that has since been
+  // somewhere the setup said it would not go.
+  const touchedAtMs = Number.isFinite(watch.sequenceAnchorMs)
+    ? Math.max(rawTouchedAtMs ?? watch.sequenceAnchorMs, watch.sequenceAnchorMs)
+    : rawTouchedAtMs;
   const fadeBuffer = Math.max(tolerance, atrM5 * CONFIG.entryFadeAtrFraction);
   const faded =
     watch.direction === "buy" ? mid < zone.low - fadeBuffer : mid > zone.high + fadeBuffer;
@@ -1236,17 +1602,60 @@ async function tickSetupWatch(watch) {
   // It never decides that no proof is needed: the fast lane it opens
   // still demands an M1 structure shift and displacement on bars that
   // closed after the touch, and it closes the moment price disagrees.
-  const skill = decideSkillContext(watch, {
+  //
+  // Forward validation and the M1 proof are computed once per tick,
+  // unconditionally, because the declared defence profile may need them
+  // even on a setup that sent no skill context at all.
+  const forward = forwardValidationState(watch, {
     mid,
     zone,
-    m1Bars: m1.bars,
+    nowMs: now,
     touchedAtMs,
+    contextAgeMs: skillContextAgeMs(watch.skill_context, now),
+    maxAgeMs: watch.skill_context?.suggested_max_age_ms ?? SKILL_CONTEXT_LIMITS.defaultMaxAgeMs,
+    thresholds: {
+      favorableR: CONFIG.skillContext.favorableR,
+      strongR: CONFIG.skillContext.strongR,
+      adverseR: CONFIG.skillContext.adverseR,
+    },
+  });
+  const m1Continuation = verifyM1Continuation(m1.bars, watch.direction, touchedAtMs, {
+    strength: CONFIG.entryMssSwingStrength,
+    displacementMultiple: CONFIG.entryDisplacementMultiple,
+    displacementLookback: CONFIG.entryDisplacementLookback,
+    minBarsAfterTouch: CONFIG.skillContext.m1MinBarsAfterTouch,
+  });
+  watch.m1ContinuationOk = m1Continuation.ok === true;
+
+  // §24 — urgency scales how long evidence must persist, and nothing
+  // else. It cannot remove a required proof, open a gate, or outrank a
+  // hard blocker; it only decides how patient the hold is, down to the
+  // same floor every other path is bounded by.
+  const baseHoldMs = urgencyHoldMs(
+    watch.urgency,
+    CONFIG.minConfirmationHoldMs,
+    CONFIG.skillContext.holdFloorMs,
+  );
+
+  const skill = decideSkillContext(watch, {
+    forward,
+    m1Continuation,
+    baseHoldMs,
     nowMs: now,
   });
   watch.skillContextState = skill;
   noteSkillContextStale(watch, skill);
+
+  // §22/§26 — what this particular setup has to prove, as the analyst
+  // declared it, rather than one universal gate applied to every setup.
+  const defence = defenceSatisfied(watch.defence_profile, {
+    sequence: watch.sequence,
+    m1Continuation,
+    forwardState: forward.state,
+  });
+  watch.defenceState = { ...defence, forwardState: forward.state };
   const sequenceReady =
-    !CONFIG.entrySequenceRequired || watch.sequence.complete || skill.requireSequence === false;
+    !CONFIG.entrySequenceRequired || defence.satisfied || skill.requireSequence === false;
 
   const result = evaluateConfirmation(watch, signals, {
     mid,
@@ -1269,22 +1678,59 @@ async function tickSetupWatch(watch) {
       watch.lifecycle = "TOUCHED";
       watch.lastReason = "evidence_decayed";
       watch.lastGateBlockReason = null;
+      // The read is no longer complete, so the deadline must not later
+      // report this as "confirmed in time and held by a gate".
+      watch.technicalConfirmationAtMs = null;
     } else if (!sequenceReady) {
-      watch.lastReason = skill.eligible
-        ? "awaiting_m1_continuation"
-        : !watch.sequence.rejection
-          ? "awaiting_zone_rejection"
-          : !watch.sequence.mss
-            ? "awaiting_m5_structure_shift"
-            : "awaiting_displacement";
+      watch.lastReason = skill.eligible ? "awaiting_m1_continuation" : defence.reason;
     } else {
       watch.lastReason = "evidence_pending";
     }
     return;
   }
 
+  // The technical read is complete. Record when, because §20's deadline
+  // distinguishes "nothing confirmed in time" from "confirmed in time and
+  // held by a gate", and those resolve differently.
+  if (!Number.isFinite(watch.technicalConfirmationAtMs)) {
+    watch.technicalConfirmationAtMs = now;
+    record(
+      watch,
+      "defence_confirmed",
+      { profile: defence.profile, lane: skill.lane, signals: result.signals, forward: forward.state },
+      now,
+    );
+  }
+
   watch.lifecycle = "CONFIRMING";
   watch.lastReason = "awaiting_gates";
+
+  // §19 — Q7 of the cold-trader sequence, asked at the only moment it
+  // means anything: the market has defended the setup, so is the entry
+  // the setup described still the entry available? Deliberately not asked
+  // earlier — price drifting out of range while defence is still forming
+  // is normal, and killing the setup for it would be the mirror image of
+  // chasing.
+  const opportunity = evaluateEntryOpportunity(watch, {
+    mid,
+    atr: atrM5,
+    tolerance,
+    maxEntryDeviation: watch.max_entry_deviation,
+    atrFraction: CONFIG.entryDeviationAtrFraction,
+    riskFraction: CONFIG.entryDeviationRiskFraction,
+    minRemainingRR: CONFIG.entryMinRemainingRR,
+  });
+  if (!opportunity.actionable) {
+    watch.lastReason = "entry_opportunity_closed";
+    record(watch, "entry_missed", { reason: opportunity.reason, detail: opportunity.detail, price: mid }, now);
+    entryMissedWatch(
+      watch,
+      `Confirmed, but the entry has escaped: ${opportunity.detail}`,
+      mid,
+      { entryMissedBy: opportunity.reason, opportunity, signals: result.signals },
+    );
+    return;
+  }
 
   const gates = await applyExternalGates(watch, spread);
   if (gates.pass) {
@@ -1292,13 +1738,26 @@ async function tickSetupWatch(watch) {
     watch.confirmedAt = new Date(now).toISOString();
     watch.confirmedAtMs = now;
     watch.lastReason = "entry_confirmed";
+    // §36 — the decision latency this entry actually ran at, measured on
+    // the path that produced it rather than estimated afterwards.
+    watch.latency = {
+      marketEventAtMs: m1.latestCloseMs ?? null,
+      dataFetchMs: dataReadyAt - fetchStartedAt,
+      decisionMs: Date.now() - now,
+      // `latestCloseMs` is already the bar's close time, not its open.
+      marketToDecisionMs: Number.isFinite(m1.latestCloseMs) ? Date.now() - m1.latestCloseMs : null,
+      holdMs: skill.holdMs,
+      lane: skill.lane,
+      profile: defence.profile,
+    };
+    record(watch, "enter_now", { price: mid, lane: skill.lane, profile: defence.profile, latency: watch.latency }, now);
     store.dirty = true;
 
     const auto = autoTradeStatus();
     if (!auto.armed) {
       // v6 behaviour, unchanged, and it is still the default: the human
       // is told to enter and nothing is sent to the broker.
-      confirmWatch(watch, mid, result, gates);
+      if (confirmWatch(watch, mid, result, gates)) openTradeFor(watch, mid, "manual_confirmation");
       return;
     }
     await executeConfirmedWatch(watch, {
@@ -1322,6 +1781,155 @@ async function tickSetupWatch(watch) {
         `<b>Evidence:</b> ${htmlEscape(result.signals.join(" + "))}\n` +
         `<b>Blocked by:</b> ${htmlEscape(reasonText)}`,
       { dedupeKey: `${watch.id}:gate:${reasonText}` },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// §6a Post-entry trade tracking (§33)
+//
+// ENTER NOW ends the setup. What follows is a different lifecycle asking
+// different questions — the stop is now a real risk boundary rather than
+// a level to interpret, and the targets are outcomes rather than reasons
+// not to enter — so it gets its own record rather than reusing the
+// setup's. The setup's resolution stays final: nothing that happens to
+// the trade can reopen it, which is what keeps §29's "one ENTER_NOW per
+// setup" true no matter how the trade goes.
+
+function openTradeFor(watch, price, source) {
+  if (!CONFIG.tradeTrackingEnabled) return null;
+  if (watch.kind === "TRADE") return null;
+  // A dry run placed no order, so there is no position to track. Tracking
+  // one would send TP and SL alerts for a trade nobody is in — which is
+  // the same class of bug as a missing alert, in the other direction.
+  if (source === "dry_run") return null;
+  const id = `trade:${watch.id}`;
+  // Idempotent for the same reason the entry alert is: a duplicate here
+  // would be a second position that does not exist.
+  if (store.get(id) || store.resolved.has(id)) return null;
+
+  const now = Date.now();
+  const entryPrice = finiteNumber(price) ?? watch.entry;
+  const trade = {
+    id,
+    kind: "TRADE",
+    parentWatchId: watch.id,
+    setup_id: watch.setup_id || null,
+    symbol: watch.symbol,
+    direction: watch.direction,
+    entry: entryPrice,
+    plannedEntry: watch.entry,
+    sl: watch.sl,
+    tp1: watch.tp1,
+    tp2: watch.tp2 ?? null,
+    tp3: watch.tp3 ?? null,
+    source,
+    targetsHit: [],
+    lifecycle: "ACTIVE_TRADE",
+    openedAt: new Date(now).toISOString(),
+    openedAtMs: now,
+    nextDueAt: now,
+    expiresAt: null,
+    trail: [],
+  };
+  try {
+    store.add(trade);
+  } catch (error) {
+    log(`trade tracking skipped for ${watch.id}: ${error.message}`);
+    return null;
+  }
+  record(trade, "trade_opened", { entry: entryPrice, source, sl: trade.sl }, now);
+  // Flushed immediately, not on the debounce: this record is the only
+  // thing that will keep watching a real position across a restart.
+  scheduleSave(true);
+  return trade;
+}
+
+async function tickTradeWatch(trade) {
+  const now = Date.now();
+  const ids = await market.resolveSymbols([trade.symbol]);
+  const symbolId = ids.get(trade.symbol);
+  if (symbolId === undefined) {
+    trade.lastReason = "symbol_unavailable";
+    noteDataQuality(trade, false, "symbol is unavailable from cTrader");
+    return;
+  }
+  const spot = await market.spot(trade.symbol, symbolId);
+  if (!spot) {
+    trade.lastReason = "spot_unavailable";
+    noteDataQuality(trade, false, "live spot price unavailable");
+    return;
+  }
+  const mid = (spot.bid + spot.ask) / 2;
+  const scale = market.checkScale(mid, trade.entry);
+  if (!scale.ok) {
+    quarantine(
+      trade,
+      `feed price ${formatLevel(mid)} is irreconcilable with the trade entry ${formatLevel(trade.entry)}`,
+    );
+    return;
+  }
+  const protective = trade.direction === "buy" ? spot.bid : spot.ask;
+  const tolerance = priceTolerance(trade.symbol, mid);
+  noteDataQuality(trade, true);
+
+  // The regime the stop is read in. There is a position now, so this is
+  // the one place the stop means exactly what its name says.
+  const safety = evaluateSafety(trade, {
+    mid,
+    executable: mid,
+    protective,
+    tolerance,
+    regime: "ACTIVE_TRADE",
+  });
+  if (safety.action === "TRADE_STOPPED") {
+    trade.lastReason = "stopped_out";
+    record(trade, "sl", { price: safety.price }, now);
+    resolveWatch(
+      trade,
+      "TRADE_STOPPED",
+      { resolvedPrice: safety.price, reason: safety.reason, targetsHit: trade.targetsHit },
+      `<b>TRADE STOPPED</b>\n` +
+        `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(trade.direction.toUpperCase())}\n` +
+        `<b>Setup ID:</b> ${htmlEscape(trade.setup_id || trade.parentWatchId)}\n` +
+        `<b>Entry:</b> ${htmlEscape(formatLevel(trade.entry))} | ` +
+        `<b>Stop:</b> ${htmlEscape(formatLevel(trade.sl))}\n` +
+        `<b>Targets reached first:</b> ${htmlEscape(trade.targetsHit.join(", ") || "none")}\n` +
+        `<i>This trade is closed and is not monitored further. It is not revived if ` +
+        `price returns.</i>`,
+    );
+    return;
+  }
+
+  const progress = evaluateTradeProgress(trade, { mid, protective, nowMs: now });
+  if (progress.action !== "TARGET" && progress.action !== "TARGET_FINAL") {
+    trade.lastReason = "in_trade";
+    return;
+  }
+  for (const target of progress.reached) {
+    trade.targetsHit = [...(trade.targetsHit || []), target.name];
+    record(trade, target.name.toLowerCase(), { level: target.level, price: progress.price }, now);
+    notify(
+      `<b>${htmlEscape(target.name)} REACHED</b>\n` +
+        `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(trade.direction.toUpperCase())}\n` +
+        `<b>Level:</b> ${htmlEscape(formatLevel(target.level))} | ` +
+        `<b>Price:</b> ${htmlEscape(formatLevel(progress.price))}\n` +
+        `<b>Setup ID:</b> ${htmlEscape(trade.setup_id || trade.parentWatchId)}`,
+      { dedupeKey: `${trade.id}:${target.name}` },
+    );
+  }
+  store.dirty = true;
+  if (progress.action === "TARGET_FINAL") {
+    trade.lastReason = "final_target_reached";
+    resolveWatch(
+      trade,
+      "TARGET_REACHED",
+      { resolvedPrice: progress.price, targetsHit: trade.targetsHit },
+      `<b>TRADE COMPLETE</b>\n` +
+        `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(trade.direction.toUpperCase())}\n` +
+        `<b>Targets reached:</b> ${htmlEscape(trade.targetsHit.join(", "))}\n` +
+        `<b>Setup ID:</b> ${htmlEscape(trade.setup_id || trade.parentWatchId)}`,
+      "normal",
     );
   }
 }
@@ -1827,7 +2435,7 @@ async function runDueWatches() {
   schedulerRunning = true;
   const now = Date.now();
   try {
-    const due = [...store.active(), ...store.activeTraps()].filter(
+    const due = [...store.active(), ...store.activeTraps(), ...store.activeTrades()].filter(
       (watch) =>
         !watch.monitorRunning &&
         watch.lifecycle !== "RESOLVED" &&
@@ -1837,9 +2445,15 @@ async function runDueWatches() {
     );
     for (const watch of due) {
       watch.monitorRunning = true;
-      const cadence = watch.kind === "TRAP" ? CONFIG.trapIntervalMs : CONFIG.setupIntervalMs;
+      const cadence =
+        watch.kind === "TRAP"
+          ? CONFIG.trapIntervalMs
+          : watch.kind === "TRADE"
+            ? CONFIG.tradeIntervalMs
+            : CONFIG.setupIntervalMs;
       try {
         if (watch.kind === "TRAP") await tickTrapWatch(watch);
+        else if (watch.kind === "TRADE") await tickTradeWatch(watch);
         else await tickSetupWatch(watch);
       } catch (error) {
         log(`watch ${watch.id} failed safely: ${error.message}`);
@@ -1871,7 +2485,7 @@ const CUSTOM_TOOLS = [
   {
     name: "register_watch",
     description:
-      "Registers a trading setup for live monitoring and, when the operator has armed auto-trade, for automatic execution. The monitor tracks live price and safety levels, waits for the entry zone to be touched, and then requires the full post-touch sequence — zone rejection, an M5 market-structure shift, and displacement — plus persistent evidence and the kill-zone/news/spread gates before it acts. A touch alone, a wick into the zone, a single candle, or an MSS without displacement never triggers an entry. If auto-trade is not armed, the confirmation is sent to Telegram for the human to take.",
+      "Registers a trading setup for live monitoring and, when the operator has armed auto-trade, for automatic execution. The monitor tracks live price and safety levels, waits for the entry zone to be touched, and then requires the defence the setup itself declared — by default zone rejection, an M5 market-structure shift, and displacement — plus persistent evidence, a still-actionable entry, and the kill-zone/news/spread gates before it acts. A touch alone, a wick into the zone, a single candle, or an MSS without displacement never triggers an entry. Price reaching the potential stop BEFORE an entry is confirmed does not kill the setup: no trade was entered, so the excursion is classified on evidence (depth against volatility, duration, reclaim, and whether any bar closed beyond the level) and the setup survives, goes back to the analyst, or dies on what that evidence says. Price running to TP1 without an entry resolves ENTRY_MISSED — the monitor never chases. If auto-trade is not armed, the confirmation is sent to Telegram for the human to take.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1888,7 +2502,17 @@ const CUSTOM_TOOLS = [
         },
         entry_zone_high: { type: "number", description: "Upper bound of the entry zone." },
         sl: { type: "number" },
+        potential_trade_sl: {
+          type: "number",
+          description:
+            "Alias for sl, in the lifecycle's own vocabulary. Where a trade WOULD be stopped. Before an entry is confirmed no trade exists, so price reaching this level opens the anti-SL evaluation rather than killing the setup.",
+        },
         invalidation: { type: "number" },
+        thesis_invalidation: {
+          type: "number",
+          description:
+            "Alias for invalidation. Where the ANALYSIS is wrong, which is a different statement from where a trade would be stopped. Send it whenever the two differ: a setup that declares only one number is treated as having declared a stop, and a stop alone never invalidates a thesis before entry.",
+        },
         invalidation_rule: {
           type: "string",
           enum: ["touch", "body_close"],
@@ -1920,6 +2544,32 @@ const CUSTOM_TOOLS = [
           type: "boolean",
           description:
             "Set false to monitor this setup without ever executing it, even while auto-trade is armed. Setting true does not arm auto-trade; only the operator's environment can do that.",
+        },
+        defence_profile: {
+          type: "string",
+          enum: [...DEFENCE_PROFILES],
+          description:
+            "Which live proof THIS setup requires after the touch. standard: zone rejection, an M5 structure shift, then displacement — the default, and the right choice when the LTF structure has not already been read. m1_continuation: the same three-step obligation on M1, for a setup whose M5/HTF shift the analysis already established; withdrawn automatically if price moves against the setup. rejection_displacement: rejection then displacement with no structure shift, for a reaction from a declared array. The monitor never picks one for you.",
+        },
+        urgency: {
+          type: "string",
+          enum: [...URGENCIES],
+          description:
+            "How fast confirmation is needed. It scales how long evidence must persist and nothing else — it cannot remove a required proof, open a gate, or outrank an invalidation.",
+        },
+        max_entry_deviation: {
+          type: "number",
+          description:
+            "How far past the planned entry price may run and still be worth entering, in price units. Replaces the volatility-and-risk derivation, but is never honoured beyond half the entry-to-stop distance. Beyond the cap the setup resolves ENTRY_MISSED rather than chasing.",
+        },
+        confirmation_deadline_minutes: {
+          type: "number",
+          description:
+            "How long confirmation may take before the read is stale. Past it, a setup that never confirmed EXPIRES and one whose evidence completed but was held by a gate goes to REANALYSIS_REQUIRED. Cannot outlive expiration_minutes.",
+        },
+        entry_monitoring_window_minutes: {
+          type: "number",
+          description: "How long the entry zone is worth watching for a touch at all.",
         },
         setup_model: { type: "string" },
         conviction: { type: "string" },
@@ -2023,8 +2673,22 @@ const CUSTOM_TOOLS = [
   {
     name: "list_watches",
     description:
-      "Returns active setup watches, active trap watches, quarantined watches, bounded recent outcomes with their real status and evidence, and the monitor's own health (restart recovery, undelivered notifications, feed quality).",
+      "Returns active setup watches, active trap watches, tracked open trades, quarantined watches, bounded recent outcomes with their real status and evidence, and the monitor's own health (restart recovery, undelivered notifications, feed quality). Each watch reports its `stage` on the setup state machine, including ANTI_SL_EVALUATION while a stop excursion is being classified, and resolved watches distinguish ENTRY_MISSED and REANALYSIS_REQUIRED from EXPIRED and INVALIDATED.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    annotations: { readOnlyHint: true }
+  },
+  {
+    name: "get_setup_trail",
+    description:
+      "Returns the ordered event trail for one setup, trap watch or tracked trade — every state transition, price event, defence step, stop excursion, anti-SL verdict and outcome, each with its own event id and the setup's correlation id — alongside the excursion record, the anti-SL measurements, the defence profile's state and the measured decision latency. Works on live and recently resolved watches. This is how a decision is reconstructed after the fact: why it entered when it did, or why it did not.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        watch_id: { type: "string", description: "The watch id returned by register_watch." },
+        setup_id: { type: "string", description: "The analyst's own setup id, if one was registered." },
+      },
+    },
     annotations: { readOnlyHint: true }
   },
   {
@@ -2157,10 +2821,51 @@ function createSetupWatch(args) {
     createdAt: new Date(now).toISOString(),
     armedAtMs: now,
     expiresAt: input.expiration_minutes ? now + input.expiration_minutes * 60_000 : null,
+    // §20 — the entry-monitoring window and the confirmation deadline are
+    // separate clocks from the setup's expiry, because "stop looking for
+    // an entry" and "this analysis is stale" are different statements.
+    // Absent both, expiry is the only boundary, exactly as before.
+    entryMonitoringUntil: input.entry_monitoring_window_minutes
+      ? now + input.entry_monitoring_window_minutes * 60_000
+      : null,
+    confirmationDeadlineAt: (() => {
+      const minutes =
+        input.confirmation_deadline_minutes ??
+        (CONFIG.confirmationDeadlineMinutes > 0 ? CONFIG.confirmationDeadlineMinutes : null);
+      return minutes ? now + minutes * 60_000 : null;
+    })(),
+    slExcursion: emptyExcursion(),
+    antiSl: null,
+    antiSlNoted: null,
+    sequenceAnchorMs: null,
+    technicalConfirmationAtMs: null,
+    m1ContinuationOk: false,
+    trail: [],
     lastReason: "armed",
     monitorRunning: false,
     nextDueAt: now,
   });
+  record(
+    watch,
+    "setup_created",
+    {
+      setup_id: watch.setup_id,
+      direction: watch.direction,
+      entry: watch.entry,
+      entry_zone: [watch.entry_zone_low, watch.entry_zone_high],
+      potential_trade_sl: watch.sl,
+      thesis_invalidation: watch.invalidation,
+      thesis_invalidation_declared: watch.thesis_invalidation_declared,
+      targets: [watch.tp1, watch.tp2, watch.tp3].filter((value) => value !== null),
+      defence_profile: watch.defence_profile,
+      urgency: watch.urgency,
+      max_entry_deviation: watch.max_entry_deviation,
+      confirmation_deadline_at: watch.confirmationDeadlineAt,
+      expires_at: watch.expiresAt,
+      skill_context: watch.skill_context ? { conviction: watch.skill_context.conviction } : null,
+    },
+    now,
+  );
   scheduleSave(true);
   void runDueWatches();
   return { watch, duplicate: false };
@@ -2273,7 +2978,7 @@ async function autoTradeReport() {
 
 function monitorHealth() {
   return {
-    schema: "watch-monitor/7.0",
+    schema: "watch-monitor/7.2",
     auto_trade: autoTradeStatus(),
     auto_trade_dry_run: CONFIG.autoTrade.dryRun,
     trades_today: tradesToday(Date.now()),
@@ -2288,7 +2993,25 @@ function monitorHealth() {
     capacity: {
       setups: `${store.setups.size}/${CONFIG.maxSetupWatches}`,
       traps: `${store.traps.size}/${CONFIG.maxTrapWatches}`,
+      trades: `${store.trades.size}/${CONFIG.maxTradeWatches}`,
     },
+    // §36 — the decision latency the last few entries actually ran at,
+    // read off the entries themselves rather than estimated.
+    entry_latency: (() => {
+      const samples = store
+        .recent()
+        .filter((item) => item.latency && Number.isFinite(item.latency.marketToDecisionMs))
+        .slice(0, 10)
+        .map((item) => item.latency);
+      if (samples.length === 0) return null;
+      const values = samples.map((item) => item.marketToDecisionMs).sort((a, b) => a - b);
+      return {
+        samples: values.length,
+        median_market_to_decision_ms: values[Math.floor(values.length / 2)],
+        worst_market_to_decision_ms: values.at(-1),
+        last: samples[0],
+      };
+    })(),
   };
 }
 
@@ -2472,11 +3195,39 @@ async function handleCustomTool(name, args = {}) {
     return textResult({
       active: store.active().map(publicWatch),
       active_trap_watches: store.activeTraps().map(publicWatch),
-      quarantined: [...store.active(), ...store.activeTraps()]
+      active_trades: store.activeTrades().map(publicWatch),
+      quarantined: [...store.active(), ...store.activeTraps(), ...store.activeTrades()]
         .filter((watch) => watch.lifecycle === "QUARANTINED")
         .map(publicWatch),
       recent: store.recent(),
       monitor_health: monitorHealth(),
+    });
+  }
+
+  if (name === "get_setup_trail") {
+    const watchId = String(args.watch_id || args.setup_id || "").trim();
+    if (!watchId) throw new Error("watch_id or setup_id is required");
+    const matches = (candidate) =>
+      candidate && (candidate.id === watchId || candidate.setup_id === watchId);
+    const live = [...store.active(), ...store.activeTraps(), ...store.activeTrades()].find(matches);
+    const resolved = live ? null : store.recent().find(matches);
+    const subject = live || resolved;
+    if (!subject) {
+      return textResult({ status: "NOT_FOUND", watch_id: watchId });
+    }
+    return textResult({
+      status: live ? "ACTIVE" : "RESOLVED",
+      watch_id: subject.id,
+      setup_id: subject.setup_id || null,
+      correlation_id: subject.setup_id || subject.id,
+      stage: stageOf(subject),
+      lifecycle: subject.lifecycle,
+      resolution: resolved ? subject.status : null,
+      sl_excursion: subject.slExcursion ?? null,
+      anti_sl: subject.antiSl ?? null,
+      defence: subject.defenceState ?? null,
+      latency: subject.latency ?? null,
+      trail: subject.trail || [],
     });
   }
 
@@ -2695,7 +3446,7 @@ async function handleMcpRequest(req, res) {
       result: {
         protocolVersion: body.params?.protocolVersion || CONFIG.protocolVersion,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "cTrader + Watch Monitor MCP", version: "7.0.0" },
+        serverInfo: { name: "cTrader + Watch Monitor MCP", version: "7.2.0" },
       },
     });
     return;

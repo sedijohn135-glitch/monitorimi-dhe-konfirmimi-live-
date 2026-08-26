@@ -377,7 +377,11 @@ assert(orders.length === 0, "a touch with no rejection, structure shift or displ
 
 console.log("\n— the sequence completes and the order goes —");
 phase = "confirm";
-spotPrice = 4319;
+// Close enough to the planned entry that the entry is still the entry the
+// setup described. §19's cap is context-aware — ATR and the setup's own
+// risk — and the far price this used to run at is now correctly refused as
+// a chase; that refusal is asserted on its own below.
+spotPrice = 4329.4;
 const executed = await waitFor(async () => (await stageOf(armed.watch_id)) === "EXECUTED", 45_000);
 assert(Boolean(executed), `the watch reached EXECUTED (${await stageOf(armed.watch_id)})`);
 assert(orders.length === 1, `exactly one order was placed (${orders.length})`);
@@ -398,6 +402,34 @@ assert(record?.execution?.volume === 0.01, `the lot size is recorded as lots (${
 assert(Boolean(record?.sequence?.rejection), "the rejection that triggered it was recorded");
 assert(Boolean(record?.sequence?.mss), "so was the structure shift");
 assert(Boolean(record?.sequence?.displacement), "so was the displacement");
+
+// §36 — the decision latency this entry actually ran at. Printed rather
+// than bounded: the number depends on the host, and asserting a threshold
+// here would make the suite fail on a slow CI box rather than on a bug.
+console.log(
+  `  [latency] market close → decision ${record?.latency?.marketToDecisionMs}ms ` +
+    `(data fetch ${record?.latency?.dataFetchMs}ms, decision ${record?.latency?.decisionMs}ms, ` +
+    `hold ${record?.latency?.holdMs}ms, lane ${record?.latency?.lane}, profile ${record?.latency?.profile})`,
+);
+assert(
+  Number.isFinite(record?.latency?.marketToDecisionMs),
+  "the entry records the latency it was decided at",
+);
+
+console.log("\n— the trade outlives the setup —");
+const withTrade = await call("list_watches");
+const trade = withTrade.active_trades.find((item) => item.parentWatchId === armed.watch_id);
+assert(Boolean(trade), "an entry opens a tracked trade, separate from the setup that produced it");
+assert(trade?.stage === "ACTIVE_TRADE", `the trade is on its own lifecycle (${trade?.stage})`);
+assert(
+  record?.status === "EXECUTED" && trade?.lifecycle === "ACTIVE_TRADE",
+  "the setup stays resolved while the trade runs; nothing about the trade can reopen it",
+);
+const tradeTrail = await call("get_setup_trail", { watch_id: trade.id });
+assert(
+  tradeTrail.trail.some((event) => event.type === "trade_opened"),
+  "and the trade carries its own event trail",
+);
 assert(
   Date.parse(record?.confirmedAt) >= Date.parse(record?.entryTouchedAt),
   "the confirmation is stamped after the touch",
