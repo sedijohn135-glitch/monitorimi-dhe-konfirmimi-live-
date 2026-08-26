@@ -22,8 +22,14 @@ session.get_range("XAUUSD", "Asia", today)
 
 ### 1.2 · SMT (Opsionale)
 
-- `DXY` D1/H4 kur Primary = XAUUSD (inverse correlation)
-- `ETHUSD` D1/H4 kur Primary = BTCUSD (direct correlation)
+- `XAGUSD` (direct) + `EURUSD` (inverse) kur Primary = XAUUSD
+- `ETHUSD` (direct) kur Primary = BTCUSD
+
+⚠️ **Jo `DXY`** — në këtë connector çdo `DXY_*` është kontratë e datuar dhe e
+çaktivizuar, pra nuk zgjidhet dot. EURUSD i lexuar së prapthi e zë vendin e tij.
+
+Monitori e llogarit SMT-në live në M5 dhe e numëron si provë të fortë për
+`ENTER NOW`. Rregulli i saktë që zbaton → [13-smt-engine.md](13-smt-engine.md)
 
 ### 1.3 · Vështirësi
 

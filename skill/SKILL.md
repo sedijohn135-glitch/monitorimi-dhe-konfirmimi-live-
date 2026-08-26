@@ -583,6 +583,14 @@ SHORT SL:  entry + (k × ATR)
     "m5": {"bias": "...", "mss": true, "displacement": true},
     "m1": {"bias": "...", "mss": true}
   },
+  "smt": {
+    "bundle": ["XAGUSD", "EURUSD(inverse)"],
+    "signal": "DIVERGENT|CONFLUENT|NEUTRAL|UNAVAILABLE",
+    "main_took_liquidity": true,
+    "partner_confirmed": false,
+    "trapped_party": "MAIN_LEG|null",
+    "note": ""
+  },
   "liquidity_pools": [
     {"level": 0.0, "side": "BSL|SSL", "type": "EQH|EQL|PDH|PDL|...", "lps": 0, "status": "UNTOUCHED|SWEPT"}
   ],
@@ -958,6 +966,7 @@ instruments:
 | 10 | [lifecycle-stages.md](references/10-lifecycle-stages.md) | MMXM/MMBM 4-Stage, Curve Side, Polarity Flip |
 | 11 | [output-schema.md](references/11-output-schema.md) | JSON Output contract + shembull i plotë |
 | 12 | [enum-registry.md](references/12-enum-registry.md) | Të gjitha vlerat enum (master list) |
+| 13 | [smt-engine.md](references/13-smt-engine.md) | SMT divergence — bundle-t reale, rregulli që monitori zbaton në M5 |
 
 **Scripts:**
 - [scripts/mcp_discovery.py](scripts/mcp_discovery.py) — Zbulim automatik i tools MCP
