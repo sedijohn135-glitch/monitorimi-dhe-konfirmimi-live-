@@ -608,6 +608,15 @@ SHORT SL:  entry + (k × ATR)
     "conviction": "A|B|C",
     "zero_float_status": "AUTHORIZED|SUSPENDED|DENIED|CONFIRMED"
   },
+  "lifecycle": {
+    "potential_trade_sl": 0.0,
+    "thesis_invalidation": 0.0,
+    "defence_profile": "standard|m1_continuation|rejection_displacement",
+    "urgency": "LOW|NORMAL|HIGH|CRITICAL",
+    "max_entry_deviation": 0.0,
+    "confirmation_deadline_minutes": 0,
+    "entry_monitoring_window_minutes": 0
+  },
   "skill_context": {
     "htf_mss_confirmed": true,
     "htf_mss_at": 0.0,
@@ -733,6 +742,141 @@ Thirr `get_skill_context_audit` dhe lexo `by_conviction`:
 Përpara se ta dërgoj, verifikoj me `python3 scripts/mcp_discovery.py` se
 `register_watch` e pranon `skill_context`. Nëse raporti thotë **unsupported**,
 monitori është version i vjetër (< v7.1) dhe unë **nuk e dërgoj** bllokun.
+
+---
+
+### 15.6 · Cikli i jetës së setup-it (`register_watch` — fushat e reja)
+
+Monitori tani i mban të ndara **katër pyetje** që më parë i përziente në
+një boolean të vetëm. Unë duhet t'i furnizoj ato me të dhënat e duhura,
+përndryshe ai detyrohet të hamendësojë — dhe hamendësimi është pikërisht
+ajo që §27 e ndalon.
+
+| Pyetja | Çfarë do të thotë | Gjendja terminale |
+|---|---|---|
+| **A. Vlefshmëria e setup-it** | A është ende e vërtetë teza? | `INVALIDATED` |
+| **B. Mundësia e hyrjes** | A është ende i hyrshëm çmimi? | `ENTRY_MISSED` |
+| **C. Konfirmimi i hyrjes** | A e mbrojti tregu setup-in? | vazhdon të presë |
+| **D. Rezultati i tregtisë** | Çfarë ndodhi pas ENTER NOW? | `TRADE_STOPPED` / `TARGET_REACHED` |
+
+#### SL nuk është invalidim teze
+
+Kjo është ndryshimi më i rëndësishëm për mua.
+
+```jsonc
+{
+  "potential_trade_sl": 4310,     // ku do të ndalej një tregti
+  "thesis_invalidation": 4302     // ku analiza ime është e gabuar
+}
+```
+
+(`sl` dhe `invalidation` janë të njëjtat fusha me emrat e vjetër; të dyja
+fjalorët pranohen.)
+
+**Dërgoji të dyja sa herë ndryshojnë.** Arsyeja:
+
+- **Para ENTER NOW nuk ka pozicion.** Nëse çmimi prek `potential_trade_sl`,
+  asgjë nuk u ndal, sepse asgjë nuk u hap. Monitori nuk e vret setup-in —
+  hap degën **Anti-SL** dhe e klasifikon ekskursionin.
+- Një setup që dërgon **vetëm një numër** ka dërguar një **stop**, dhe një
+  stop i vetëm nuk e invalidon tezën para hyrjes.
+- Një `thesis_invalidation` i deklaruar që çmimi e thyen realisht e vret
+  setup-in menjëherë.
+
+#### Anti-SL: çfarë maton monitori
+
+Dega nuk aktivizohet kurrë për një setup që s'iu afrua stop-it, dhe asnjë
+hyrje normale nuk e pret. Kur ndodh, matet **ky** ekskursion:
+
+mbyllja e trupit përtej nivelit · thellësia ndaj ATR (dhe ndaj riskut kur
+ATR mungon) · kohëzgjatja e vëzhguar · shpejtësia · a u rikthye dhe a
+qëndroi rikthimi një bar · a u thye struktura kundër setup-it · a pasoi
+displacement kundërshtar.
+
+Rezultatet: `SURVIVES` (kthehet te mbrojtja — **nuk** është konfirmim),
+`UNCERTAIN` (i kufizuar në kohë, pastaj `REANALYSIS_REQUIRED`),
+`INVALIDATED` (setup i vdekur, pa ringjallje).
+
+⚠️ `liquidity_swept` nga `skill_context` raportohet si **kontekst
+mbështetës** dhe nuk vendos kurrë. Mos e dërgo duke shpresuar se do të
+"shpëtojë" një ekskursion të thellë.
+
+#### Mbrojtja specifike e setup-it
+
+| `defence_profile` | Kërkohet pas touch-it | Kur ta përdor |
+|---|---|---|
+| `standard` *(parazgjedhje)* | rejection → MSS M5 → displacement | struktura LTF nuk është lexuar ende |
+| `m1_continuation` | rejection → MSS M1 → displacement M1 | e kam tashmë MSS-in M5/HTF. Tërhiqet vetë nëse çmimi shkon kundër |
+| `rejection_displacement` | rejection → displacement | teza është reagim nga një array i deklaruar, jo thyerje strukture |
+
+Kjo është përgjigjja ime ndaj pyetjes «çfarë informacioni të ri sjell MSS-i
+M5 pas touch-it?». Nëse e kam lexuar tashmë, nuk sjell asgjë dhe kushton
+5–15 minuta → `m1_continuation`. Nëse s'e kam lexuar, është e vetmja provë
+strukturore → `standard`.
+
+#### Koha, urgjenca dhe largësia e hyrjes
+
+| Fusha | Kuptimi |
+|---|---|
+| `confirmation_deadline_minutes` | sa gjatë mund të zgjasë konfirmimi para se leximi të vjetrohet |
+| `entry_monitoring_window_minutes` | sa gjatë ia vlen të ndiqet zona për një touch |
+| `max_entry_deviation` | sa larg entry-t të planifikuar ia vlen ende të hyhet |
+| `urgency` | `LOW`/`NORMAL`/`HIGH`/`CRITICAL` |
+
+`urgency` shkallëzon **vetëm** sa gjatë duhet të mbahet evidenca. Nuk heq
+një provë të kërkuar, nuk hap një portë dhe nuk mund ta tejkalojë një
+invalidim. Treg i shpejtë pa mbrojtje → pret gjithsesi.
+
+`max_entry_deviation` nuk nderohet kurrë përtej **gjysmës** së distancës
+entry→stop: përtej saj R:R-ja mbi të cilën u pranua setup-i nuk ekziston
+më. Nëse çmimi ikën, monitori jep `ENTRY_MISSED` dhe **nuk e ndjek**.
+
+#### Shembull i plotë
+
+```jsonc
+{
+  "setup_id": "XAU-2026-08-26-01",
+  "symbol": "XAUUSD", "direction": "buy",
+  "entry": 4330.0,
+  "entry_zone_low": 4328.0, "entry_zone_high": 4332.0,
+  "potential_trade_sl": 4310.0,
+  "thesis_invalidation": 4302.0,
+  "tp1": 4390.0, "tp2": 4415.0, "tp3": 4450.0,
+
+  "defence_profile": "m1_continuation",
+  "urgency": "HIGH",
+  "max_entry_deviation": 3.0,
+  "confirmation_deadline_minutes": 25,
+  "expiration_minutes": 120,
+
+  "skill_context": {
+    "htf_mss_confirmed": true,
+    "trap_phase": "delivery",
+    "liquidity_swept": true,
+    "m5_mss_already_observed": true,
+    "htf_bias": "bullish",
+    "conviction": "HIGH",
+    "suggested_min_hold_ms": 15000,
+    "skip_m5_sequence_if": "m5_mss_already_observed"
+  }
+}
+```
+
+#### Pas ENTER NOW
+
+Tregtia vazhdon në një regjistrim **të vetin** (`ACTIVE_TRADE` → TP1/TP2/
+TP3/`TRADE_STOPPED`). Setup-i mbetet i zgjidhur përgjithmonë: asgjë që i
+ndodh tregtisë nuk e rihap atë. Kjo është ajo që e mban të vërtetë rregullin
+«një ENTER_NOW për çdo setup».
+
+#### Gjurma e ngjarjeve
+
+`get_setup_trail` më kthen historinë e plotë të një setup-i — çdo tranzicion,
+çdo hap mbrojtjeje, çdo ekskursion dhe verdikt Anti-SL, me `event_id` dhe
+`correlation_id` — plus matjet e ekskursionit dhe latencën reale të vendimit.
+E përdor për të kuptuar **pse** hyri kur hyri, ose pse nuk hyri.
+
+→ Kontrata e plotë: [`docs/setup-lifecycle.md`](../docs/setup-lifecycle.md)
 
 ---
 

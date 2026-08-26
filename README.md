@@ -1,4 +1,4 @@
-# Watch Monitor MCP — v7.1
+# Watch Monitor MCP — v7.2
 
 An MCP server that monitors ICT sniper setups and `TRAP_NOT_CONFIRMED`
 reads to a deterministic conclusion, notifies a human over Telegram, and
@@ -9,10 +9,28 @@ Auto-trade is **off by default**. With it off, v7 behaves exactly like
 v6: it watches, it confirms, it tells you, and it never touches the
 account.
 
-## The entry sequence
+## The setup lifecycle
 
 A setup watch does not enter because price reached the entry. It enters
-because the market did all of this, in this order, after the touch:
+because the market did all of this, in this order, after the touch —
+and it does not die because price reached the stop before any of it
+happened, because at that point nothing was entered and nothing was
+stopped out.
+
+Four questions, answered separately, because collapsing any two of them
+is how a system kills a setup that was still alive or enters a trade that
+no longer exists:
+
+| | Question | Terminal state when the answer is no |
+|---|---|---|
+| **A** | is the thesis still true? | `INVALIDATED` |
+| **B** | is the price still enterable? | `ENTRY_MISSED` |
+| **C** | has the market defended the setup? | keeps waiting |
+| **D** | what happened after ENTER NOW? | `TRADE_STOPPED` / `TARGET_REACHED` |
+
+Full contract: [`docs/setup-lifecycle.md`](docs/setup-lifecycle.md).
+
+## The entry sequence
 
 ```
 REGISTERED_WATCH
@@ -28,9 +46,12 @@ REGISTERED_WATCH
   → EXECUTED
 ```
 
-Anything that fails ends at `INVALIDATED`, `EXPIRED` or `CANCELLED`.
-`QUARANTINED` is entered when the feed cannot be trusted to describe the
-instrument at all.
+Anything that fails ends at `INVALIDATED`, `ENTRY_MISSED`,
+`REANALYSIS_REQUIRED`, `EXPIRED` or `CANCELLED`. `ANTI_SL_EVALUATION` is
+entered when price reaches the stop before any entry was taken, and
+`QUARANTINED` when the feed cannot be trusted to describe the instrument
+at all. After an entry the trade continues on its own record:
+`ACTIVE_TRADE → TP1 · TP2 · TP3 · TRADE_STOPPED`.
 
 None of these, on their own or in the wrong order, produces an entry:
 
@@ -46,6 +67,55 @@ Every step is proven on a **closed** bar that closed **after** the touch,
 and the current stage of every watch is reported as `stage` by
 `list_watches`.
 
+### When price goes to the stop before you are in
+
+Nothing about this runs on a setup that never went near its stop, and no
+normal entry waits for it. **Do not wait for a problem that has not
+happened.** But when the problem does happen, it gets classified rather
+than assumed:
+
+```
+             SL excursion event?
+                ╱             ╲
+             no               yes
+              │                │
+     continue normally   ANTI_SL_EVALUATION
+                               │
+                 ┌─────────────┼─────────────┐
+             SURVIVES      UNCERTAIN     INVALIDATED
+                 │             │              │
+          back to defence   bounded, then  setup dead,
+           evaluation      fresh analysis  no resurrection
+```
+
+Both lazy readings are forbidden — *"gold hunts stops, so ignore it"* and
+*"price touched the stop, so it is dead"* — because each replaces
+evidence with a prior. What is measured is this excursion: whether any
+**closed body** printed beyond the level, how deep it went against ATR
+(and against the setup's own risk when ATR cannot be read), how long
+price actually spent there, how fast it went and came back, whether the
+reclaim held for a closed bar, and whether structure broke against the
+setup with displacement behind it. Swept liquidity from `skill_context`
+is reported as supporting context and never decides.
+
+Surviving is **not** confirming: the setup goes back to defence
+evaluation and has to earn the entry on price action that printed after
+the reclaim. Invalidation is final — price running to the original target
+later does not mean the old setup was right.
+
+Turn the branch off with `ANTI_SL_ENABLED=false` and price reaching the
+stop before entry kills the setup outright, as it used to.
+
+### When the entry runs away
+
+Price reaching TP1 without you, or a confirmation that arrives with price
+too far from the planned entry, both resolve `ENTRY_MISSED`. Not an
+expiry, not a failure — the thesis may have been perfectly right — and
+never a reason to chase. The distance that counts as too far is derived
+from the instrument's volatility and the setup's own risk, not from a
+fixed number of points, and only drift that makes the fill *worse*
+counts.
+
 ### What the setup can declare about itself
 
 `register_watch` takes the analyst's own rules, not just levels:
@@ -53,8 +123,13 @@ and the current stage of every watch is reported as `stage` by
 | Field | Meaning |
 |---|---|
 | `entry_zone_low` / `entry_zone_high` | the entry band, e.g. `4330` / `4334`. Touched at the edge price approaches from, never at the midpoint |
+| `potential_trade_sl` (= `sl`) + `thesis_invalidation` (= `invalidation`) | where a trade **would be stopped**, and where the **analysis is wrong**. Send both whenever they differ: a setup that declares only one number has declared a stop, and before entry a stop alone invalidates nothing — it opens the anti-SL branch instead |
+| `defence_profile` | what **this** setup must prove after the touch: `standard`, `m1_continuation` or `rejection_displacement`. The monitor never picks one for you |
+| `urgency` | `LOW`/`NORMAL`/`HIGH`/`CRITICAL`. Scales how long evidence must hold and nothing else — it cannot remove a proof, open a gate, or outrank an invalidation |
+| `max_entry_deviation` | how far past the planned entry is still worth entering. Never honoured beyond half the entry-to-stop distance |
+| `confirmation_deadline_minutes` | how long confirmation may take before the read is stale |
 | `prerequisite_level` + `prerequisite_timeframe` + `prerequisite_rule` | what must print before entry is live at all, e.g. an M15 **body close** below `4324.71`. A wick through it is not a close, and until it prints the watch reports `WAITING_FOR_SETUP_CONFIRMATION` |
-| `invalidation_rule: "body_close"` + `invalidation_timeframe` | a wick above `4368.31` is not invalidation if the rule says body close. The **stop loss stays a hard price line either way**, so this can never leave a position unprotected |
+| `invalidation_rule: "body_close"` + `invalidation_timeframe` | a wick above `4368.31` is not invalidation if the rule says body close. Once a trade is open the **stop loss is a hard price line either way**, so this can never leave a position unprotected |
 | `risk_percent` / `volume` | per-setup sizing overrides |
 | `auto_trade: false` | monitor this setup but never execute it, even while auto-trade is armed |
 | `skill_context` | what the analysis already proved before the touch — see below |
@@ -229,7 +304,8 @@ After that:
 ```
 index.js            server, scheduler, both engines, execution driver, MCP + REST surface
 lib/core.mjs        pure logic — scaling, bar discipline, analytics, evidence, entry
-                    sequence, skill context, sizing, the pre-submission checklist
+                    sequence, skill context, setup lifecycle, anti-SL-Hunter,
+                    entry opportunity, event trail, sizing, the pre-submission checklist
 lib/execution.mjs   upstream tool discovery, schema-driven order payloads, submission
 lib/upstream.mjs    managed cTrader MCP client + coalescing market-data layer
 lib/store.mjs       watch registry + durable atomic snapshot
@@ -237,7 +313,9 @@ lib/notify.mjs      Telegram outbox with retry and delivery accounting
 test/adversarial.test.mjs   the 25 required attack scenarios
 test/execution.test.mjs     the entry sequence, sizing, checklist and payload construction
 test/skill-context.test.mjs the skill-context fast lane and the guardrails around it
+test/lifecycle.test.mjs     the setup lifecycle, anti-SL-Hunter and entry opportunity
 docs/skill-context.md       the contract the analysis skill fills in
+docs/setup-lifecycle.md     the setup lifecycle contract, in full
 test/smoke.mjs              boots the real server against a fake upstream, twice
 test/smoke-autotrade.mjs    drives a scripted setup all the way to a placed order
 skill/                      the ICT Sniper Liquidity Engine analysis skill that fills it
@@ -308,6 +386,24 @@ a complete confirmation sequence, can ask the broker for a position.
 | `ENTRY_MSS_SWING_STRENGTH` | `2` | bars either side that make a pivot a pivot |
 | `ENTRY_FADE_ATR_FRACTION` | `0.5` | how far outside the zone price may drift before the sequence resets |
 
+### Setup lifecycle
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ANTI_SL_ENABLED` | `true` | `false` restores the old behaviour: price reaching the stop before entry kills the setup outright |
+| `ANTI_SL_WICK_DEPTH_ATR` / `ANTI_SL_MAX_DEPTH_ATR` | `0.5` / `1` | how deep a sweep may be, and past what depth it is a move rather than a sweep |
+| `ANTI_SL_WICK_DEPTH_RISK` / `ANTI_SL_MAX_DEPTH_RISK` | `0.15` / `0.35` | the same two bounds as fractions of the setup's own risk, used when ATR cannot be read. With neither available the excursion is unclassifiable, which is `UNCERTAIN` and never `SURVIVES` |
+| `ANTI_SL_WICK_DURATION_MS` / `ANTI_SL_MAX_DURATION_MS` | `300000` / `900000` | how long price may sit beyond the line |
+| `ANTI_SL_RECLAIM_HOLD_MS` | `60000` | a reclaim has to hold for a closed bar |
+| `ANTI_SL_FAST_ATR_PER_MIN` | `1` | the speed at which a deeper excursion is still credible as a sweep |
+| `ANTI_SL_MAX_EVALUATION_MS` | `1800000` | past this an unclassified excursion goes back to the analyst |
+| `ENTRY_DEVIATION_ATR_FRACTION` | `0.75` | volatility term of the entry-deviation cap |
+| `ENTRY_DEVIATION_RISK_FRACTION` | `0.3` | ceiling as a fraction of entry-to-stop |
+| `ENTRY_MIN_REMAINING_RR` | `0.5` | floor on what remains of the R:R **at the fill**. Deliberately below the 1R registration demands — the acceptance requirement moves the fill up to 0.35R past entry by design, so a 1R floor here would contradict it |
+| `CONFIRMATION_DEADLINE_MINUTES` | `0` (off) | service-wide default for the per-setup deadline |
+| `TRADE_TRACKING_ENABLED` | `true` | the post-entry TP/SL lifecycle |
+| `TRADE_WATCH_INTERVAL_MS` / `MAX_TRADE_WATCHES` | `10000` / `10` | its cadence and capacity |
+
 ### Skill context
 
 | Variable | Default | Notes |
@@ -356,6 +452,10 @@ a complete confirmation sequence, can ask the broker for a position.
 - `POST /register_watch`, `/register_trap_watch` — REST mirrors that share
   the exact tool code path, so the two surfaces cannot drift.
 - `GET /skill_context_audit` — the same, for the skill-context audit.
+- `get_setup_trail` (MCP tool) — one setup's whole ordered history: every
+  state transition, defence step, stop excursion, anti-SL verdict and
+  outcome, each with its own event id and the setup's correlation id,
+  plus the excursion measurements and the measured decision latency.
 - `GET /test-telegram`, `/test-news`.
 
 ## Deploying

@@ -238,6 +238,88 @@ def inspect_skill_context(tools: list) -> dict:
     return result
 
 
+# Fushat e ciklit të jetës (Watch Monitor v7.2+). Mungesa e tyre do të thotë
+# monitor i vjetër: dërgimi i tyre do të refuzohej te validimi, sepse skema e
+# `register_watch` është `additionalProperties: false`.
+LIFECYCLE_FIELDS = {
+    "potential_trade_sl": "ku do të ndalej një tregti (alias i `sl`)",
+    "thesis_invalidation": "ku analiza është e gabuar (alias i `invalidation`)",
+    "defence_profile": "cila provë live kërkohet pas touch-it",
+    "urgency": "sa gjatë duhet të mbahet evidenca — asgjë tjetër",
+    "max_entry_deviation": "sa larg entry-t ia vlen ende të hyhet",
+    "confirmation_deadline_minutes": "sa gjatë mund të zgjasë konfirmimi",
+    "entry_monitoring_window_minutes": "sa gjatë ndiqet zona për një touch",
+}
+
+
+def inspect_lifecycle(tools: list) -> dict:
+    """
+    A i pranon monitori fushat e ciklit të jetës (v7.2+)?
+
+    E njëjta rregull si te `inspect_skill_context`: lexohet nga skema reale,
+    dhe mungesa e skemës është `unknown`, jo `unsupported`.
+    """
+    result = {"status": "unsupported", "accepted_fields": [], "missing_fields": [], "trail_tool": None}
+
+    schema = None
+    saw_any_schema = False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name")
+        if tool.get("inputSchema"):
+            saw_any_schema = True
+        if name in TOOL_ALIASES["watch.register"] or name == "watch.register":
+            schema = tool.get("inputSchema") or {}
+        if name in ("get_setup_trail", "watch.trail", "setup_trail"):
+            result["trail_tool"] = name
+
+    if not saw_any_schema:
+        result["status"] = "unknown"
+        result["missing_fields"] = sorted(LIFECYCLE_FIELDS)
+        return result
+    if not schema:
+        return result
+
+    accepted = set((schema.get("properties") or {}).keys())
+    known = set(LIFECYCLE_FIELDS)
+    result["accepted_fields"] = sorted(accepted & known)
+    result["missing_fields"] = sorted(known - accepted)
+    # `defence_profile` është fusha që u shtua me ciklin e jetës; pa të,
+    # monitori është < v7.2 sado fusha të tjera të ketë.
+    if "defence_profile" in accepted:
+        result["status"] = "supported"
+    return result
+
+
+def print_lifecycle_report(lifecycle: dict) -> None:
+    """Çfarë pranon monitori për ciklin e jetës së setup-it."""
+    print("\n🔄 SETUP LIFECYCLE (SL vs invalidim teze, Anti-SL, entry missed):")
+    status = lifecycle["status"]
+    if status == "unknown":
+        print("  ❔ Skema e tools nuk u lexua dot (manual mode).")
+        print("     Verifiko me tools/list përpara se t'i dërgosh këto fusha.")
+        return
+    if status == "unsupported":
+        print("  ⛔ Ky monitor është < v7.2: nuk i pranon fushat e ciklit të jetës.")
+        print("     Prekja e stop-it para hyrjes do ta vrasë setup-in menjëherë,")
+        print("     dhe TP1 pa hyrje do të raportohet si EXPIRED, jo ENTRY_MISSED.")
+        print("     MOS i dërgo fushat e reja — skema i refuzon.")
+        return
+
+    print(f"  ✅ register_watch pranon {len(lifecycle['accepted_fields'])} fusha të ciklit të jetës")
+    for field in lifecycle["accepted_fields"]:
+        print(f"     · {field}  ←  {LIFECYCLE_FIELDS[field]}")
+    if lifecycle["missing_fields"]:
+        print("\n  ⚠️  Fusha që ky MCP nuk i pranon (mos i dërgo):")
+        for field in lifecycle["missing_fields"]:
+            print(f"     · {field}")
+    if lifecycle["trail_tool"]:
+        print(f"\n  🧾 Gjurma: `{lifecycle['trail_tool']}` — pse hyri kur hyri, ose pse jo.")
+    else:
+        print("\n  ⚠️  Nuk u gjet mjet gjurme; vendimet nuk mund të rindërtohen pas faktit.")
+
+
 def check_coverage(discovered_tools: list, config: dict) -> dict:
     """Check which required tools are covered."""
     discovered_set = set(discovered_tools)
@@ -460,6 +542,7 @@ def main():
 
     # A i pranon monitori konfirmimet që skill-i i ka bërë tashmë?
     print_skill_context_report(inspect_skill_context(raw_tools))
+    print_lifecycle_report(inspect_lifecycle(raw_tools))
 
 
 if __name__ == "__main__":

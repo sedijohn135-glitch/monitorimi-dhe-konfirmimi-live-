@@ -83,17 +83,42 @@ test("E3 — a declared body-close invalidation is not tripped by a wick", () =>
   assert.equal(closed.action, "FAIL");
 });
 
-test("E3b — the stop loss stays a hard price line under the body-close rule", () => {
+test("E3b — the stop loss stays a hard price line once a trade is actually open", () => {
+  // Before entry there is no position, so reaching the stop is an
+  // excursion to be classified (§7/§17), not a stop-out. The hard-line
+  // guarantee belongs to the regime where the line guards real money.
   const watch = { ...SELL, invalidation_rule: "body_close", entryTouched: true };
-  const verdict = evaluateSafety(watch, {
+  const beforeEntry = evaluateSafety(watch, {
     mid: 4371,
     executable: 4371,
     protective: 4371,
     tolerance: 0.1,
     invalidationConfirmed: false,
   });
-  assert.equal(verdict.action, "FAIL");
-  assert.match(verdict.reason, /SL/);
+  assert.equal(beforeEntry.action, "SL_EXCURSION");
+
+  const inTrade = evaluateSafety(watch, {
+    mid: 4371,
+    executable: 4371,
+    protective: 4371,
+    tolerance: 0.1,
+    invalidationConfirmed: false,
+    regime: "ACTIVE_TRADE",
+  });
+  assert.equal(inTrade.action, "TRADE_STOPPED");
+  assert.match(inTrade.reason, /Stop loss/);
+
+  // And the escape hatch still produces the old hard failure.
+  const antiSlOff = evaluateSafety(watch, {
+    mid: 4371,
+    executable: 4371,
+    protective: 4371,
+    tolerance: 0.1,
+    invalidationConfirmed: false,
+    antiSlEnabled: false,
+  });
+  assert.equal(antiSlOff.action, "FAIL");
+  assert.match(antiSlOff.reason, /SL/);
 });
 
 // ---------------------------------------------------------------------------
