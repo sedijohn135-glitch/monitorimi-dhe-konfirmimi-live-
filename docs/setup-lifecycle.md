@@ -211,16 +211,25 @@ not been read, it is the only structural proof there is, and it stays.
 
 ## Time
 
-| Field | Meaning |
-|---|---|
-| `expiration_minutes` | the setup is over |
-| `entry_monitoring_window_minutes` | how long the zone is worth watching for a touch |
-| `confirmation_deadline_minutes` | how long confirmation may take before the read is stale |
+Three clocks, bounding three different things.
 
-Past the confirmation deadline: a setup that never completed its read
-`EXPIRED`; one whose read completed but was held by a gate goes to
-`REANALYSIS_REQUIRED`, because that is a question for the analyst rather
-than an expiry.
+| Field | Bounds | Runs from |
+|---|---|---|
+| `entry_monitoring_window_minutes` | how long to wait for price to reach the zone | registration |
+| `confirmation_deadline_minutes` | how long confirmation may take **once it has something to confirm** | **the touch** |
+| `expiration_minutes` | when the setup is over regardless | registration |
+
+**The confirmation deadline runs from the touch.** Before the touch there
+is no confirmation to bound, so measuring it from registration turns it
+into a second entry window — a shorter one that silently overrides the
+entry window the analyst actually declared. A setup whose zone price
+never reached would then die at the confirmation deadline with its thesis
+intact and its own entry window still open.
+
+Past the **entry window** with no touch: `ENTRY_MISSED` if price has left
+the entry behind, `EXPIRED` if it is still nearby and nothing happened.
+Past the **confirmation deadline**: `EXPIRED` if the read never
+completed, `REANALYSIS_REQUIRED` if it completed and a gate held it.
 
 The clock is a **boundary, never a delay**. Inside the window nothing
 waits for a next candle, a next minute or a round number: the entry fires

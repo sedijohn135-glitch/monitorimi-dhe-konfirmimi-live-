@@ -78,6 +78,7 @@ import {
   classifyWick,
   closedSeries,
   computeOrderVolume,
+  confirmationDeadlineFor,
   defenceSatisfied,
   displacementCheck,
   emptyExcursion,
@@ -1363,10 +1364,43 @@ async function tickSetupWatch(watch) {
     return;
   }
 
-  // §20 — the confirmation clock, checked before anything that could
-  // confirm. A technical read that completes after the deadline is a read
-  // of a different market than the one the setup was written for.
-  const timeWindow = evaluateTimeWindow(watch, { nowMs: now, killZoneEnabled: false });
+  // §20 — the three clocks. Which one applies depends on what has
+  // actually happened: before the touch the entry window bounds the wait,
+  // after it the confirmation deadline bounds the read. A touch landing on
+  // this very tick counts as touched, so the two can never both fire.
+  const timeWindow = evaluateTimeWindow(watch, {
+    nowMs: now,
+    killZoneEnabled: false,
+    entryTouched: watch.entryTouched === true || safety.action === "TOUCH",
+  });
+  if (timeWindow.state === "ENTRY_WINDOW_CLOSED") {
+    record(watch, "time_window", { state: timeWindow.state, detail: timeWindow.detail }, now);
+    // Price never came to the zone. Whether that is a missed opportunity
+    // or a setup that simply never happened is decided by where price
+    // actually is: run away from the entry, and the opportunity closed;
+    // still nearby, and nothing happened at all.
+    const opportunity = evaluateEntryOpportunity(watch, {
+      mid,
+      atr: null,
+      tolerance,
+      maxEntryDeviation: watch.max_entry_deviation,
+      atrFraction: CONFIG.entryDeviationAtrFraction,
+      riskFraction: CONFIG.entryDeviationRiskFraction,
+      minRemainingRR: CONFIG.entryMinRemainingRR,
+    });
+    watch.lastReason = "entry_window_closed";
+    if (!opportunity.actionable) {
+      entryMissedWatch(
+        watch,
+        `The entry zone was never reached and price has left it: ${opportunity.detail}`,
+        mid,
+        { entryMissedBy: opportunity.reason, opportunity, timeWindow },
+      );
+    } else {
+      expireWatch(watch, `Entry window closed: ${timeWindow.detail}`, mid);
+    }
+    return;
+  }
   if (timeWindow.state === "DEADLINE_PASSED") {
     record(watch, "time_window", { state: timeWindow.state, detail: timeWindow.detail }, now);
     // §21's mirror image: if the evidence was already complete and only a
@@ -1395,8 +1429,20 @@ async function tickSetupWatch(watch) {
     watch.sequence = emptySequence();
     watch.lifecycle = "TOUCHED";
     watch.lastReason = "entry_touched";
+    // The confirmation clock starts here, because this is the moment
+    // there is a confirmation to time.
+    watch.confirmationDeadlineAt = confirmationDeadlineFor(watch);
     store.dirty = true;
-    record(watch, "entry_zone_reached", { price: safety.price, zone: { low: zone.low, high: zone.high } }, now);
+    record(
+      watch,
+      "entry_zone_reached",
+      {
+        price: safety.price,
+        zone: { low: zone.low, high: zone.high },
+        confirmation_deadline_at: watch.confirmationDeadlineAt,
+      },
+      now,
+    );
     notify(
       `<b>ENTRY TOUCHED</b>\n` +
         `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(watch.direction.toUpperCase())}\n` +
@@ -3120,12 +3166,13 @@ function createSetupWatch(args) {
     entryMonitoringUntil: input.entry_monitoring_window_minutes
       ? now + input.entry_monitoring_window_minutes * 60_000
       : null,
-    confirmationDeadlineAt: (() => {
-      const minutes =
-        input.confirmation_deadline_minutes ??
-        (CONFIG.confirmationDeadlineMinutes > 0 ? CONFIG.confirmationDeadlineMinutes : null);
-      return minutes ? now + minutes * 60_000 : null;
-    })(),
+    // Stamped when the entry is touched, not here: see
+    // confirmationDeadlineFor. Starting it at registration makes it a
+    // second entry window, shorter than the one the analyst declared.
+    confirmation_deadline_minutes:
+      input.confirmation_deadline_minutes ??
+      (CONFIG.confirmationDeadlineMinutes > 0 ? CONFIG.confirmationDeadlineMinutes : null),
+    confirmationDeadlineAt: null,
     slExcursion: emptyExcursion(),
     antiSl: null,
     antiSlNoted: null,
@@ -3152,7 +3199,8 @@ function createSetupWatch(args) {
       defence_profile: watch.defence_profile,
       urgency: watch.urgency,
       max_entry_deviation: watch.max_entry_deviation,
-      confirmation_deadline_at: watch.confirmationDeadlineAt,
+      confirmation_deadline_minutes: watch.confirmation_deadline_minutes,
+      entry_monitoring_until: watch.entryMonitoringUntil,
       expires_at: watch.expiresAt,
       skill_context: watch.skill_context ? { conviction: watch.skill_context.conviction } : null,
     },
