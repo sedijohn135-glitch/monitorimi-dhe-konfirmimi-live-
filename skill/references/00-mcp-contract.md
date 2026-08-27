@@ -148,6 +148,37 @@ të regjistroj një setup:
 Kontrata e plotë → [SKILL.md §15.6](../SKILL.md) dhe
 `docs/setup-lifecycle.md` te repo-ja e monitorit.
 
+### 1.9 · Trap Promotion (v7.3+)
+
+```
+TRAP PROMOTION (Watch Monitor MCP v7.3+):
+  - register_trap_watch pranon: auto_promote
+```
+
+Ndryshim i rëndësishëm sjelljeje, jo thjesht një fushë e re: **një trap i
+konfirmuar mund të kthehet vetë në setup të regjistruar**, i cili pastaj
+hyn në ciklin normal të konfirmimit dhe mund të prodhojë `ENTER NOW` — pa
+rianalizë dhe pa më pyetur.
+
+Zbulimi: nëse `auto_promote` nuk është te skema e `register_trap_watch`,
+monitori është < v7.3 dhe një trap i regjistruar mbetet vetëm informativ,
+si më parë.
+
+| Vlera | Efekti |
+|---|---|
+| e hequr | sipas mjedisit të operatorit |
+| `false` | ky trap **nuk promovohet kurrë** |
+| `true` | **asgjë** — vetëm operatori e armatos promovimin |
+
+Dy detyrime kur promovimi mund të jetë aktiv:
+
+1. **`trap_score` në formë të lexueshme** (`"7/9"`, `"Grade B (6/9)"`, `"7"`)
+   — pa të, porta e rezultatit refuzon çdo promovim.
+2. **`invalidation_level` i menduar mirë** — bëhet vija e tezës së setup-it
+   të promovuar, e ndarë nga stop-i strukturor.
+
+Kontrata e plotë → [SKILL.md §15.7](../SKILL.md)
+
 ---
 
 ## 2 · EVENT-DRIVEN WATCH (Pattern i Ri)

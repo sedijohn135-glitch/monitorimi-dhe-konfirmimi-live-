@@ -320,6 +320,47 @@ def print_lifecycle_report(lifecycle: dict) -> None:
         print("\n  ⚠️  Nuk u gjet mjet gjurme; vendimet nuk mund të rindërtohen pas faktit.")
 
 
+def inspect_promotion(tools: list) -> dict:
+    """
+    A e promovon monitori vetë një trap të konfirmuar në setup (v7.3+)?
+
+    Kjo nuk është thjesht një fushë — ndryshon se çfarë do të thotë të
+    regjistrosh një trap, prandaj skill-i duhet ta dijë përpara se ta bëjë.
+    """
+    result = {"status": "unsupported", "opt_out_field": False}
+    saw_any_schema = False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("inputSchema"):
+            saw_any_schema = True
+        if tool.get("name") in TOOL_ALIASES.get("trap_watch.register", ["register_trap_watch"]):
+            properties = (tool.get("inputSchema") or {}).get("properties") or {}
+            if "auto_promote" in properties:
+                result["status"] = "supported"
+                result["opt_out_field"] = True
+    if not saw_any_schema:
+        result["status"] = "unknown"
+    return result
+
+
+def print_promotion_report(promotion: dict) -> None:
+    """A mund të kthehet një trap i regjistruar në një tregti pa më pyetur."""
+    print("\n🪤 TRAP PROMOTION (trapi i konfirmuar → setup i gatshëm):")
+    status = promotion["status"]
+    if status == "unknown":
+        print("  ❔ Skema e tools nuk u lexua dot (manual mode).")
+        return
+    if status == "unsupported":
+        print("  ⛔ Monitor < v7.3: një trap i regjistruar mbetet vetëm informativ.")
+        print("     Pas konfirmimit duhet ta rianalizoj dhe ta regjistroj setup-in vetë.")
+        return
+    print("  ✅ Një trap i konfirmuar mund të kthehet VETË në setup dhe të japë ENTER NOW.")
+    print("     · dërgo `trap_score` të lexueshëm (\"7/9\") ose porta e rezultatit refuzon")
+    print("     · `invalidation_level` bëhet vija e tezës së setup-it — mendoje mirë")
+    print("     · `auto_promote: false` e mban trapin thjesht informativ")
+
+
 def check_coverage(discovered_tools: list, config: dict) -> dict:
     """Check which required tools are covered."""
     discovered_set = set(discovered_tools)
@@ -543,6 +584,7 @@ def main():
     # A i pranon monitori konfirmimet që skill-i i ka bërë tashmë?
     print_skill_context_report(inspect_skill_context(raw_tools))
     print_lifecycle_report(inspect_lifecycle(raw_tools))
+    print_promotion_report(inspect_promotion(raw_tools))
 
 
 if __name__ == "__main__":
