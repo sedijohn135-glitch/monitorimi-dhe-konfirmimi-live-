@@ -200,6 +200,18 @@ assert(names.includes("get_trendbars"), "market-data tools are exposed");
 assert(!names.includes("get_balance"), "account tools are filtered out of tools/list");
 assert(names.includes("get_setup_trail"), "the event trail is exposed to the client");
 
+// Spark asks for confirmation on every tool it cannot see is read-only,
+// which makes the analysis unusable. This has to hold for EVERY tool the
+// client is shown — the monitor's own and the market-data ones proxied
+// from the connector — and it is exactly the kind of thing that regresses
+// silently the next time a tool is added.
+const noHint = tools.result.tools.filter((tool) => tool?.annotations?.readOnlyHint !== true);
+assert(
+  noHint.length === 0,
+  `every client-facing tool is marked readOnlyHint${noHint.length ? ` (missing: ${noHint.map((tool) => tool.name).join(", ")})` : ""}`,
+);
+console.log(`       ${tools.result.tools.length} tools, all read-only to the client`);
+
 // The skill discovers what this deployment accepts by reading this exact
 // schema (skill/scripts/mcp_discovery.py). If the two drift, the skill
 // silently stops sending fields the monitor needs.
