@@ -210,152 +210,51 @@ counts.
 | `auto_trade: false` | monitor this setup but never execute it, even while auto-trade is armed |
 | `skill_context` | what the analysis already proved before the touch — see below |
 
-## What the analysis already knows
+## Confirmation
 
-The analysis skill confirms things this monitor never sees: the HTF
-market-structure shift it read half an hour ago, the trap phase, the
-liquidity it watched get swept, and — the one that costs real time — the
-M5 structure shift that printed *before* price came back to the entry
-zone. Without that, the monitor re-derives the same sequence after the
-touch and confirms five to fifteen minutes behind the move the analyst
-called.
+Every setup confirms the same way. There is no lane, no shortcut, and no
+per-setup exception the monitor can grant itself — which is the only way
+the operator can predict what it will do.
 
-`register_watch` therefore takes an optional `skill_context`. It decides
-**which live proof is required** and **how long it must hold** — never
-that no proof is required:
+**By default** (`ENTRY_SEQUENCE_REQUIRED=false`) an entry needs:
 
-```jsonc
-"skill_context": {
-  "m5_mss_already_observed": true,      // the claim that makes the M5 sequence a re-derivation
-  "htf_mss_confirmed": true,
-  "liquidity_swept": true,
-  "trap_phase": "delivery",
-  "htf_bias": "bullish",                // cross-checked against direction
-  "conviction": "HIGH",                 // only HIGH can shorten the hold
-  "suggested_min_hold_ms": 15000,       // never below the 15s floor
-  "suggested_max_age_ms": 180000,       // after this the context confers nothing
-  "skip_m5_sequence_if": "m5_mss_already_observed"
-}
-```
+- **live acceptance** — price has travelled far enough beyond the entry,
+  and still sits far enough from the risk line, to call the level
+  accepted rather than merely touched; and
+- **at least one graduated technical signal** — CISD, SMT divergence, or
+  a price pattern (rejection wick / engulfing).
 
-When a context asks for it *and* price has moved in the setup's favour
-since the touch, the post-touch M5 sequence is replaced by **M1
-continuation**: an M1 structure shift and an M1 displacement, both on
-bars that closed after the touch. Same obligation, faster clock. On a
-`STRONG_MOVE` with `HIGH` conviction the hold drops to the 15 s floor —
-still with the M1 proof, still with the evidence machine, still behind
-every gate.
+Each has to survive both wall-clock time and a market-time boundary
+before it counts. Poll frequency is never a substitute for market time.
 
-Five forward-validation states decide what a context is worth once the
-touch happens:
+That is the confirmation this monitor shipped with, and the one its
+operator reports as the one that worked: later than the touch, and
+reliably right when it fired.
 
-| State | Meaning | Effect |
-|---|---|---|
-| `WITHIN_ZONE` | nothing decisive yet | standard sequence |
-| `FAVORABLE_EARLY` | ≥ 0.15R in favour | fast lane, pending M1 proof |
-| `STRONG_MOVE` | ≥ 0.5R in favour | fast lane; hold at the floor on HIGH conviction |
-| `STALE` | freshness window closed | fast lane refused, one Telegram message |
-| `FAILED` | ≥ 0.5R against | fast lane and hold shortening both revoked |
+**Set `ENTRY_SEQUENCE_REQUIRED=true`** and the post-touch sequence is
+required on top — zone rejection, a structure shift, then displacement,
+each proven on a closed bar that closed after the touch. It is stricter
+and five to fifteen minutes slower. `defence_profile` chooses which
+sequence a given setup must prove.
 
-Nothing in this path touches safety: stop loss, invalidation, expiry,
-spread, news, kill zone and the price-scale falsification are unchanged
-in every lane. A context whose `htf_bias` disagrees with its own setup
-gets no fast lane at all. Omit `skill_context` and the monitor behaves
-exactly as it did before it existed.
+### The fast lane, and why it is gone
 
-`get_skill_context_audit` scores every claim against what the market then
-did — `skill_said_HIGH_but_failed`, `skill_said_LOW_and_confirmed` — so
-the conviction scale can be calibrated and fast-lane outcomes compared
-against standard-sequence ones before the lane is widened.
+An earlier version let the analysis skill claim it had already read the
+M5 structure shift, and accept an M1 proof in its place.
 
-Full contract, including what the skill should send and how to read the
-result back: [`docs/skill-context.md`](docs/skill-context.md).
+It could not work. The lane opened only while the analysis was still
+inside its own freshness window — three minutes by default — but an
+analysis is written, then registered, then waits for price to come back
+to the zone. On the live setup that prompted its removal the context was
+**six minutes past its window before the watch was even registered**, and
+thirty-four minutes past it by the time price arrived. The lane never
+opened. All it produced was a Telegram message announcing that it had
+been refused, which read as a fault every time.
 
-## Trap promotion
-
-A trap watch answers one falsifiable question — did the level get taken
-with delivery — and then hands the question back to a human, who re-runs
-the analysis and registers a setup. With `AUTO_PROMOTE_TRAPS=true` the
-server closes that gap itself: on confirmation it recomputes the
-geometry and registers the setup, so trap → setup → entry → order runs
-with nobody in the loop.
-
-That is a bigger step than arming auto-trade, because it removes the last
-human read. It has its own switch, off by default, independent of
-`AUTO_TRADE_ENABLED`. Armed with auto-trade off it still earns its keep:
-the setup is registered and monitored, and the confirmation arrives as an
-actionable alert with levels instead of a "re-run the pipeline" one.
-
-### The hard gates
-
-Not the 23-item scored checklist — scoring is judgement, and judgement
-nobody reads is not judgement. What runs is the load-bearing binary
-subset, and **every one of them must pass**:
-
-| Gate | Passes when |
-|---|---|
-| `auto_promote_enabled` | promotion is armed and this trap did not opt out |
-| `kill_zone` | a kill zone is open, or opens within `PROMOTE_KILL_ZONE_LOOKAHEAD_MIN` — never in NY lunch or at the weekend |
-| `news` | no manual lockout and no high-impact event inside the blackout window |
-| `displacement` | the **confirming candle itself** carries ≥ `PROMOTE_DISPLACEMENT_MULTIPLE` (default 3.0x) against its own 20-bar trailing average |
-| `trap_score` | the trap's recorded score, normalised to /9, is at or above `PROMOTE_MIN_TRAP_SCORE` |
-| `invalidation_untouched` | the trap's flip level has not been reached, wick included |
-
-A gate whose input cannot be read fails. An unmeasurable displacement
-ratio, a missing `trap_score`, an unreadable news feed — each is a no,
-because this decision creates orders and an unanswerable question is not
-a yes. Register traps with a score the parser can read (`"7/9"`,
-`"Grade B (6/9)"`, `"7"`) or they will never promote.
-
-The displacement threshold here is the analysis pipeline's **3.0x**, not
-the execution sequence's 1.8x. They answer different questions: 3.0x
-decides whether this move deserves a setup at all, 1.8x decides whether a
-setup that already exists is being entered at the right moment. The
-looser one still runs downstream, on top of this.
-
-### The geometry
-
-Computed with the same primitives as `scripts/ict_levels.py`, ported to
-`lib/ict.mjs` — strict 3-candle swings, body-close structure breaks, FVGs
-with CE and penetration:
-
-- **Entry** is a PDA array, never the level price just displaced through:
-  the nearest unfilled FVG's CE first, the order block's mean threshold
-  second, the trigger level as a breaker retest only if neither exists.
-  The array's bounds become the setup's `entry_zone_low`/`high`.
-- **Stop** goes beyond the nearest strict swing on the far side of the
-  zone, plus a `PROMOTE_SL_BUFFER_ATR_FRACTION` buffer.
-- **Targets** are real levels, nearest first: the working range's
-  equilibrium, pooled EQH/EQL, swing liquidity, then the higher
-  timeframe's range. Each is at least half an R past the last.
-- **TP1 must clear `PROMOTE_MIN_RR`** (default 1R) or the promotion is
-  refused — a trap that has run out of room is not a setup.
-
-Every refusal names what stopped it, in the same spirit as a trap's own
-`what_is_missing`, and the trap still resolves and still notifies. A
-promotion that failed silently would be indistinguishable from one that
-never ran.
-
-### What it does not touch
-
-`AUTO_TRADE_DRY_RUN` stays a deploy-level switch; promotion never flips
-it, and a promoted setup runs the same dry run as a hand-registered one.
-`AUTO_TRADE_MAX_OPEN_POSITIONS`, `AUTO_TRADE_MAX_TRADES_PER_DAY`,
-`AUTO_TRADE_MAX_SLIPPAGE_RISK_FRACTION` and the downstream kill-zone and
-news gates are unchanged: promotion is an **extra upstream filter**, not
-a replacement for anything below it. A promoted setup still has to be
-touched, still has to show rejection → M5 MSS → displacement, and still
-has to clear the whole pre-submission checklist.
-
-### Rolling it out
-
-1. `AUTO_PROMOTE_TRAPS=true` with auto-trade still off. Confirm in the
-   logs and Telegram that the *computed setups* look like setups you
-   would have taken: right model, right array, right stop, sane targets,
-   and the right gate decisions on the ones that were refused.
-2. Then arm auto-trade with `AUTO_TRADE_DRY_RUN=true` and check the
-   order payload separately.
-3. Only once both have been read in the logs, drop the dry run.
+`skill_context` is still accepted and still worth sending — as a
+**record**. `get_skill_context_audit` scores each claim against what the
+market then did, which is the only way the conviction scale can be
+calibrated. It changes no confirmation decision.
 
 ## Auto-trade
 
@@ -549,7 +448,7 @@ a complete confirmation sequence, can ask the broker for a position.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `ENTRY_SEQUENCE_REQUIRED` | `true` | set `false` to fall back to v6 evidence only — **not recommended with auto-trade armed** |
+| `ENTRY_SEQUENCE_REQUIRED` | `false` | evidence only, the confirmation this monitor shipped with. Set `true` to also require the post-touch sequence |
 | `ENTRY_DISPLACEMENT_MULTIPLE` | `1.8` | trigger body vs the recent average body |
 | `ENTRY_DISPLACEMENT_LOOKBACK` | `10` | bars in that average |
 | `ENTRY_MSS_SWING_STRENGTH` | `2` | bars either side that make a pivot a pivot |
@@ -577,9 +476,8 @@ a complete confirmation sequence, can ask the broker for a position.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `SKILL_CONTEXT_ENABLED` | `true` | `false` still records and audits contexts, but lets none of them change anything |
-| `SKILL_CONTEXT_FAST_LANE_ENABLED` | `true` | `false` keeps hold tuning but always requires the M5 sequence |
-| `SKILL_CONTEXT_MIN_HOLD_FLOOR_MS` | `15000` | the shortest hold any context can buy; floor of `5000` |
+| `SKILL_CONTEXT_ENABLED` | `true` | contexts are recorded and audited; none of them change a confirmation either way |
+| `SKILL_CONTEXT_MIN_HOLD_FLOOR_MS` | `15000` | the shortest hold urgency can reach; floor of `5000` |
 | `SKILL_CONTEXT_M1_MIN_BARS` | `2` | closed M1 bars required since the touch before continuation can be proven |
 | `SKILL_CONTEXT_FAVORABLE_R` | `0.15` | `FAVORABLE_EARLY` threshold, in entry-to-invalidation multiples |
 | `SKILL_CONTEXT_STRONG_R` | `0.5` | `STRONG_MOVE` threshold |

@@ -153,6 +153,10 @@ const env = {
   SCHEDULER_TICK_MS: "1000",
   WATCH_INTERVAL_MS: "3000",
   MIN_CONFIRMATION_HOLD_MS: "0",
+  // Default confirmation: evidence only, no post-touch sequence required.
+  // That is what this suite exercises; smoke-autotrade covers the strict
+  // path with ENTRY_SEQUENCE_REQUIRED=true.
+  ENTRY_SEQUENCE_REQUIRED: "false",
   KILL_ZONE_FILTER_ENABLED: "false",
   NEWS_FILTER_ENABLED: "false",
 };
@@ -399,10 +403,22 @@ const withContext = JSON.parse(
   ).result.content[0].text,
 );
 assert(withContext.skill_context?.accepted === true, "a skill context is accepted and echoed back");
-assert(withContext.skill_context?.fast_lane_available === true, "the fast lane is available to it");
+// The whole point of the rewrite: a context is recorded, and it changes
+// nothing. A skill sending the old fast-lane fields gets the same
+// confirmation as a skill sending none — no lane, and no refusal message
+// that reads like a fault.
 assert(
-  withContext.skill_context?.effective_hold_ms === 15000,
-  `HIGH conviction shortened the hold (${withContext.skill_context?.effective_hold_ms}ms)`,
+  withContext.skill_context?.effect_on_confirmation === "none — the context is recorded and audited, not acted on",
+  `the context confers nothing (${withContext.skill_context?.effect_on_confirmation})`,
+);
+assert(
+  withContext.skill_context?.fast_lane_available === undefined &&
+    withContext.skill_context?.fast_lane_refused_because === undefined,
+  "and there is no lane left to report as available or refused",
+);
+assert(
+  typeof withContext.skill_context?.confirmation_path === "string",
+  `it states the one confirmation path instead (${withContext.skill_context?.confirmation_path})`,
 );
 
 const conflicted = JSON.parse(
@@ -422,12 +438,17 @@ const conflicted = JSON.parse(
   ).result.content[0].text,
 );
 assert(
-  conflicted.skill_context?.fast_lane_available === false,
-  "a context whose bias disagrees with its own setup gets no fast lane",
+  conflicted.skill_context?.direction_conflict === true,
+  "a context whose bias disagrees with its own setup is flagged",
 );
 assert(
-  Array.isArray(conflicted.skill_context?.fast_lane_refused_because),
-  "and is told exactly why",
+  Array.isArray(conflicted.skill_context?.warnings) &&
+    conflicted.skill_context.warnings.some((line) => /disagrees/.test(line)),
+  "and the disagreement is named in the warnings",
+);
+assert(
+  conflicted.skill_context?.confirmation_path === withContext.skill_context?.confirmation_path,
+  "but it confirms exactly like every other setup — there is nothing to withhold",
 );
 
 const malformed = await rpc("tools/call", {
@@ -439,7 +460,9 @@ const malformed = await rpc("tools/call", {
     entry: 4414.5,
     sl: 4400,
     tp1: 4450,
-    skill_context: { suggested_min_hold_ms: "soon" },
+    // A field that still exists and is structurally wrong. The removed
+    // fast-lane fields are now simply dropped, so they prove nothing.
+    skill_context: { htf_mss_at: "soon" },
   },
 });
 assert(Boolean(malformed.error), "a malformed skill context is rejected at validation, not defaulted");

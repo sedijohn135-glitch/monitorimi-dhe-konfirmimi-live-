@@ -258,6 +258,9 @@ const env = {
   SCHEDULER_TICK_MS: "1000",
   WATCH_INTERVAL_MS: "3000",
   MIN_CONFIRMATION_HOLD_MS: "2000",
+  // The post-touch sequence is opt-in now. This suite is the one that
+  // proves it still works end to end, so it turns it on explicitly.
+  ENTRY_SEQUENCE_REQUIRED: "true",
   BAR_CACHE_MAX_MS: "5000",
   BAR_CACHE_FRACTION: "0.05",
   SPOT_CACHE_MS: "0",

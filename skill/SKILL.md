@@ -637,10 +637,6 @@ SHORT SL:  entry + (k × ATR)
     "m5_mss_at_ms": 0,
     "htf_bias": "bullish|bearish",
     "conviction": "HIGH|MEDIUM|LOW",
-    "suggested_min_hold_ms": 15000,
-    "suggested_max_age_ms": 180000,
-    "skip_m5_sequence_if": "m5_mss_already_observed",
-    "require_m1_only_if": "m5_mss_already_observed",
     "expected_displacement_tf": "M5",
     "analysis_at_ms": 0,
     "note": ""
@@ -661,36 +657,48 @@ SHORT SL:  entry + (k × ATR)
 
 ---
 
-### 15.5 · Dorëzimi i konfirmimeve te monitori (`skill_context`)
+### 15.5 · `skill_context` — çfarë regjistroj, jo çfarë kërkoj
 
-Deri tani konfirmimet e mia mbeteshin brenda meje. Unë lexoja MSS-in HTF 30
-minuta më parë, klasifikoja fazën e kurthit, shihja likuiditetin të marrë dhe —
-më e shtrenjta në kohë — shihja MSS-in M5 të printonte **para** se çmimi të
-kthehej në zonë. Asgjë prej tyre nuk shkonte te monitori. Ai priste touch-in
-dhe e ri-nxirrte të njëjtën sekuencë M5 nga e para, duke konfirmuar 5–15 minuta
-pas lëvizjes që unë e kisha thirrur.
+Deri tani ky bllok kërkonte një **korsi të shpejtë**: unë pretendoja se
+MSS-in M5 e kisha parë tashmë, dhe monitori pranonte një provë M1 në vend
+të sekuencës M5.
 
-**Rregulli:** kur thërras `register_watch`, kaloj bllokun `skill_context`.
+**Ajo korsi u hoq, sepse nuk hapej kurrë.** Ajo kërkonte që analiza ime të
+ishte ende brenda dritares së vet të freskisë (3 minuta) kur çmimi kthehej
+te zona. Por një analizë shkruhet, pastaj regjistrohet, pastaj pritet
+çmimi. Në një setup real konteksti ishte **6 minuta i vjetruar para se
+watch-i të regjistrohej fare**, dhe 34 minuta i vjetruar kur çmimi arriti.
+E vetmja gjë që prodhonte ishte një mesazh Telegram që njoftonte refuzimin
+— dhe që lexohej si defekt çdo herë.
+
+**Rregulli tani:** `skill_context` është një **regjistrim**. Ai nuk ndryshon
+asnjë vendim konfirmimi. Çdo setup konfirmohet njësoj — kjo është e vetmja
+mënyrë që operatori ta parashikojë sjelljen.
 
 ```jsonc
 {
   "symbol": "XAUUSD", "direction": "buy",
   "entry": 4330.0, "sl": 4310.0, "tp1": 4390.0,
-  "entry_zone_low": 4328.0, "entry_zone_high": 4332.0,
 
   "skill_context": {
     "htf_mss_confirmed": true,
+    "htf_mss_at": 4318.4,
     "trap_phase": "delivery",
+    "trap_sub_type": "Type 1",
     "liquidity_swept": true,
+    "liquidity_target": 4673.74,
     "m5_mss_already_observed": true,
     "htf_bias": "bullish",
     "conviction": "HIGH",
-    "suggested_min_hold_ms": 15000,
-    "suggested_max_age_ms": 180000,
-    "skip_m5_sequence_if": "m5_mss_already_observed"
+    "expected_displacement_tf": "M5",
+    "note": "arsyetimi im, shkurt"
   }
 }
 ```
+
+⚠️ Fushat `skip_m5_sequence_if`, `require_m1_only_if`, `suggested_min_hold_ms`
+dhe `suggested_max_age_ms` **nuk ekzistojnë më**. Nëse i dërgoj, hidhen pa
+zhurmë. Mos i dërgo.
 
 #### Nga cili output vjen çdo fushë
 
@@ -701,57 +709,29 @@ pas lëvizjes që unë e kisha thirrur.
 | `trap_sub_type` | `trap_analysis.trap_sub_type` |
 | `liquidity_swept` | `liquidity_pools[].status == "SWEPT"` |
 | `liquidity_target` | niveli te `ilos_state.primary_objective` |
-| `m5_mss_already_observed`, `m5_mss_at_ms` | `structure.m5.mss` **dhe** `structure.m5.displacement` |
+| `m5_mss_already_observed` | `structure.m5.mss` **dhe** `structure.m5.displacement` |
 | `htf_bias` | `ilos_state.bias` |
 | `conviction` | `ilos_state.confidence` — **HIGH/MEDIUM/LOW**, jo A/B/C |
 
-⚠️ `execution.conviction` është `A|B|C` dhe **nuk** shkon këtu. Monitori pret
-`HIGH|MEDIUM|LOW` — çdo vlerë tjetër lexohet si `MEDIUM`.
+⚠️ `execution.conviction` është `A|B|C` dhe **nuk** shkon këtu.
 
-#### Çfarë blen dhe çfarë nuk blen
+#### Pse ia vlen ende ta dërgoj
 
-Monitori e përdor kontekstin për të vendosur **cila provë live kërkohet** dhe
-**sa gjatë duhet mbajtur** — kurrë që s'duhet provë fare. Kur konteksti e
-kërkon dhe çmimi ka lëvizur në favor pas touch-it, sekuenca M5 zëvendësohet me
-**M1 continuation**: MSS M1 + displacement M1, të dyja në bare të mbyllura
-**pas** touch-it. E njëjta detyrë provuese, orë më e shpejtë.
-
-| Gjendja pas touch-it | Efekti |
-|---|---|
-| `WITHIN_ZONE` (< 0.15R) | sekuenca standarde M5 |
-| `FAVORABLE_EARLY` (≥ 0.15R pro) | korsi e shpejtë, pret provën M1 |
-| `STRONG_MOVE` (≥ 0.5R pro) | korsi e shpejtë; hold në dysheme me HIGH |
-| `STALE` (dritarja e freskisë mbaroi) | korsia refuzohet, 1 mesazh Telegram |
-| `FAILED` (≥ 0.5R kundër) | korsia dhe shkurtimi i hold-it revokohen |
-
-Rregulla që s'thyhen kurrë:
-
-- **Zgjatja e `suggested_min_hold_ms` pranohet gjithmonë. Shkurtimi kërkon
-  `conviction: HIGH` dhe nuk zbret kurrë nën dyshemenë 15s.**
-- **Nëse `htf_bias` bie ndesh me `direction`, korsia refuzohet plotësisht.**
-  Mos e dërgo bias-in nëse nuk je i sigurt — një gabim aty e vret përfitimin.
-- **Dërgo vetëm atë që ke vërejtur vërtet.** Auditi e krahason pretendimin me
-  rezultatin; një `HIGH` i rremë del në pah menjëherë.
-- SL, invalidation, expiry, spread, news dhe kill zone nuk preken nga asgjë këtu.
-
-Hiqe `skill_context` fare dhe monitori sillet saktësisht si më parë.
-
-#### Kalibrimi (detyrim periodik)
-
-Thirr `get_skill_context_audit` dhe lexo `by_conviction`:
+Për **kalibrim**. `get_skill_context_audit` e krahason çdo pretendim me
+atë që bëri tregu:
 
 - `HIGH` që del vazhdimisht `FAILED` → shkalla ime e conviction-it është e fryrë.
 - `LOW` që del vazhdimisht `CONFIRMED` → jam tepër konservator.
-- Krahaso `by_lane` para se ta zgjeroj korsinë e shpejtë: ajo vlen vetëm nëse
-  rezultatet e saj përputhen me ato të sekuencës standarde.
 
-#### Përputhshmëria
+Ky është i vetmi mekanizëm që e mat nëse gjykimi im vlen. Dërgo vetëm atë
+që ke vërejtur vërtet — një `HIGH` i rremë del në pah menjëherë.
 
-Përpara se ta dërgoj, verifikoj me `python3 scripts/mcp_discovery.py` se
-`register_watch` e pranon `skill_context`. Nëse raporti thotë **unsupported**,
-monitori është version i vjetër (< v7.1) dhe unë **nuk e dërgoj** bllokun.
+Nëse `htf_bias` bie ndesh me `direction`, shënohet si konflikt në
+`warnings`. Setup-i regjistrohet gjithsesi; nuk ka asgjë për t'u mbajtur
+mbrapa, sepse asgjë nuk jepej.
 
----
+SL, invalidation, expiry, spread, news dhe kill zone nuk preken nga asgjë
+këtu — as më parë, as tani.
 
 ### 15.6 · Cikli i jetës së setup-it (`register_watch` — fushat e reja)
 
@@ -851,11 +831,11 @@ më. Nëse çmimi ikën, monitori jep `ENTRY_MISSED` dhe **nuk e ndjek**.
   "thesis_invalidation": 4302.0,
   "tp1": 4390.0, "tp2": 4415.0, "tp3": 4450.0,
 
-  "defence_profile": "m1_continuation",
-  "urgency": "HIGH",
+  "defence_profile": "standard",
+  "urgency": "NORMAL",
   "max_entry_deviation": 3.0,
-  "confirmation_deadline_minutes": 25,
-  "expiration_minutes": 120,
+  "entry_monitoring_window_minutes": 180,
+  "expiration_minutes": 240,
 
   "skill_context": {
     "htf_mss_confirmed": true,
@@ -863,9 +843,7 @@ më. Nëse çmimi ikën, monitori jep `ENTRY_MISSED` dhe **nuk e ndjek**.
     "liquidity_swept": true,
     "m5_mss_already_observed": true,
     "htf_bias": "bullish",
-    "conviction": "HIGH",
-    "suggested_min_hold_ms": 15000,
-    "skip_m5_sequence_if": "m5_mss_already_observed"
+    "conviction": "HIGH"
   }
 }
 ```
@@ -983,7 +961,7 @@ deklarata ime se ku analiza është e gabuar. Ta dërgoj me kujdes.
 | 0 Float pa Collection Grade A/B | Sekioni Zero Float OMISSO plotësisht |
 | `register_watch` nuk pranon `skill_context` | Mos e dërgo bllokun; sekuenca standarde M5 |
 | `htf_bias` bie ndesh me `direction` | Hiqe `htf_bias`, ose rishiko setup-in — korsia refuzohet gjithsesi |
-| Analiza më e vjetër se `suggested_max_age_ms` | Ri-analizo; konteksti i vjetër nuk vlen më |
+| Analiza më e vjetër se ~3 minuta kur çmimi arrin te zona | Normale — konteksti është regjistrim, jo afat. Konfirmimi nuk ndryshon |
 
 ---
 

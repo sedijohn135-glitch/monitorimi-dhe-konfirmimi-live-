@@ -3,8 +3,17 @@
 This is the contract between the analysis skill and the monitor for
 everything that happens between a setup being written and a trade being
 over. It is the companion to [`skill-context.md`](skill-context.md),
-which covers what the analysis already proved before the touch; this
-document covers what the monitor does with the setup afterwards.
+which covers what the analysis records alongside a setup; this document
+covers what the monitor does with the setup afterwards.
+
+> **Confirmation is the same for every setup.** An earlier version let a
+> skill context request a shortened path. That path could not open in
+> practice — it required the analysis to still be inside its own
+> three-minute freshness window at the moment price returned to the zone,
+> which is after a wait nobody controls — so it was removed. Nothing an
+> analyst sends changes *how* a setup confirms; `defence_profile` only
+> chooses *what it must prove*, and only when the post-touch sequence is
+> required at all.
 
 The optimisation target is **the earliest defensible entry** — not the
 earliest possible one, and not the most confirmed one. Every rule below
@@ -195,7 +204,7 @@ has to prove, and the monitor never picks for them.
 | `defence_profile` | Required after the touch | Use it when |
 |---|---|---|
 | `standard` *(default)* | rejection → M5 structure shift → displacement | the LTF structure has not already been read |
-| `m1_continuation` | rejection → M1 structure shift → M1 displacement | the M5/HTF shift is already established. Withdrawn automatically once price moves against the setup |
+| `m1_continuation` | rejection → M1 structure shift → M1 displacement | the M5/HTF shift is already established. Withdrawn automatically once price moves against the setup. A *declared* choice, evaluated identically every tick — not a lane that opens and closes |
 | `rejection_displacement` | rejection → displacement | the thesis is a reaction from a declared array, not a structural break |
 
 Every profile requires the zone rejection. `m1_continuation` is a faster
