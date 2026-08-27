@@ -888,6 +888,88 @@ E përdor për të kuptuar **pse** hyri kur hyri, ose pse nuk hyri.
 
 ---
 
+### 15.7 · Çfarë ndodh me një trap pasi konfirmohet (v7.3+)
+
+Deri tani, kur regjistroja një trap watch, po regjistroja diçka **thjesht
+informative**: monitori priste, dhe kur kushtet printonin më dërgonte një
+mesazh. Pastaj unë e rianalizoja tregun dhe regjistroja setup-in me dorë.
+
+**Kjo nuk është më e vërtetë.** Nëse operatori e ka armatosur promovimin
+(`AUTO_PROMOTE_TRAPS=true`), monitori e llogarit vetë setup-in dhe e
+regjistron:
+
+```
+TRAPI KONFIRMOHET  →  gjeometria rillogaritet  →  SETUP I REGJISTRUAR
+                                                        ↓
+                                        cikli i zakonshëm, i paprekur:
+                                        prekje → mbrojtje → porta → ENTER NOW
+```
+
+Domethënë: **një trap watch që regjistroj unë mund të përfundojë në një
+sinjal hyrjeje pa më pyetur më.** Duhet ta kem këtë parasysh kur vendos
+nëse ia vlen ta regjistroj fare.
+
+#### Gjashtë portat e promovimit
+
+Promovimi nuk ndodh sepse trapi u konfirmua. Duhen të gjitha:
+
+| Porta | Kalon kur |
+|---|---|
+| `auto_promote_enabled` | promovimi është i armatosur dhe ky trap nuk ka dalë jashtë |
+| `kill_zone` | një zonë është e hapur ose hapet së shpejti; kurrë NY Lunch, kurrë fundjavë |
+| `news` | asnjë lajm me ndikim të lartë në dritaren e bllokimit |
+| `displacement` | **vetë qiriu konfirmues** mban ≥3.0x mesataren |
+| `trap_score` | rezultati i regjistruar, i normalizuar në /9, është ≥6 |
+| `invalidation_untouched` | flip level-i nuk është prekur, as me fitil |
+
+⚠️ **Çdo e panjohur dështon.** Nëse nuk dërgoj `trap_score` në formë të
+lexueshme (`"7/9"`, `"Grade B (6/9)"`, `"7"`), porta e rezultatit do ta
+refuzojë çdo herë. Kjo nuk është opsionale më.
+
+#### `auto_promote` — valvula ime
+
+```jsonc
+{
+  "symbol": "XAUUSD", "bias": "sell",
+  "trigger_level": 4310,
+  "invalidation_level": 4360,
+  "trap_score": "7/9",
+  "auto_promote": false      // ← ky trap mbetet vetëm informativ
+}
+```
+
+| Vlera | Efekti |
+|---|---|
+| e hequr | sillet sipas mjedisit të operatorit |
+| `false` | **ky trap nuk promovohet kurrë**, edhe kur promovimi është i armatosur |
+| `true` | **nuk bën asgjë** — vetëm mjedisi i operatorit e armatos promovimin |
+
+E vetmja vlerë që ka kuptim është `false`. Është asimetri e qëllimshme: unë
+mund të **heq** leje, kurrë të shtoj.
+
+**Kur ta dërgoj `auto_promote: false`:**
+
+- kur e lexoj trapin, por struktura rreth tij është e turbullt;
+- kur `trap_score` është kufitar dhe unë vetë nuk do të hyja;
+- kur po e regjistroj thjesht për vëzhgim, jo si mundësi tregtimi;
+- kur nuk kam besim te niveli i invalidimit që po dërgoj.
+
+Në dyshim, dërgoje `false`. Një trap i paprommovuar më kushton një mesazh;
+një i promovuar gabimisht kushton një tregti.
+
+#### `invalidation_level` tani mban peshë të dyfishtë
+
+Kur një trap promovohet, **flip level-i im bëhet vija e tezës e setup-it**,
+ndërsa stop-i i llogaritur nga struktura mbetet stop.
+
+Kjo është dyshja që i duhet mbrojtjes Anti-SL: prekja e **stop-it** hap
+vlerësimin e ekskursionit, prekja e **flip level-it** e mbyll setup-in.
+
+Pra `invalidation_level` nuk është më vetëm "ku ta ndaloj vëzhgimin" — është
+deklarata ime se ku analiza është e gabuar. Ta dërgoj me kujdes.
+
+---
+
 ## 16 · FAILURE HANDLING
 
 | Situatë | Veprim |
