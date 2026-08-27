@@ -160,6 +160,27 @@ afterwards — deliberately left for afterwards, because promotion already
 removes the human read, and changing both at once leaves no way to tell
 which one was responsible for the outcome.
 
+### Three clocks, not one
+
+Collapsing them is how a setup that is still perfectly alive gets killed
+by the wrong one.
+
+| Field | Bounds | Runs from |
+|---|---|---|
+| `entry_monitoring_window_minutes` | how long to wait for price to reach the zone | registration |
+| `confirmation_deadline_minutes` | how long confirmation may take **once it has something to confirm** | **the touch** |
+| `expiration_minutes` | when the setup is over regardless | registration |
+
+Before the touch there is no confirmation to bound, so a confirmation
+deadline measured from registration is really a second entry window
+wearing the wrong name — a shorter one that silently overrides the entry
+window the analyst declared.
+
+Past the **entry window** with no touch: `ENTRY_MISSED` if price has left
+the entry behind, `EXPIRED` if it is still nearby and nothing happened.
+Past the **confirmation deadline**: `EXPIRED` if the read never
+completed, `REANALYSIS_REQUIRED` if it completed and a gate held it.
+
 ### When the entry runs away
 
 Price reaching TP1 without you, or a confirmation that arrives with price
@@ -181,7 +202,8 @@ counts.
 | `defence_profile` | what **this** setup must prove after the touch: `standard`, `m1_continuation` or `rejection_displacement`. The monitor never picks one for you |
 | `urgency` | `LOW`/`NORMAL`/`HIGH`/`CRITICAL`. Scales how long evidence must hold and nothing else — it cannot remove a proof, open a gate, or outrank an invalidation |
 | `max_entry_deviation` | how far past the planned entry is still worth entering. Never honoured beyond half the entry-to-stop distance |
-| `confirmation_deadline_minutes` | how long confirmation may take before the read is stale |
+| `confirmation_deadline_minutes` | how long confirmation may take **once the zone is touched** — the clock runs from the touch, not from registration |
+| `entry_monitoring_window_minutes` | how long to wait for price to reach the zone at all |
 | `prerequisite_level` + `prerequisite_timeframe` + `prerequisite_rule` | what must print before entry is live at all, e.g. an M15 **body close** below `4324.71`. A wick through it is not a close, and until it prints the watch reports `WAITING_FOR_SETUP_CONFIRMATION` |
 | `invalidation_rule: "body_close"` + `invalidation_timeframe` | a wick above `4368.31` is not invalidation if the rule says body close. Once a trade is open the **stop loss is a hard price line either way**, so this can never leave a position unprotected |
 | `risk_percent` / `volume` | per-setup sizing overrides |
