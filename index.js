@@ -120,6 +120,12 @@ import {
 } from "./lib/core.mjs";
 import { CTraderMcpClient, MarketData, asArray } from "./lib/upstream.mjs";
 import { Executor } from "./lib/execution.mjs";
+import {
+  computePromotedSetup,
+  confirmingDisplacement,
+  evaluatePromotionGates,
+  killZoneOutlook,
+} from "./lib/promotion.mjs";
 import { Notifier } from "./lib/notify.mjs";
 import { WatchStore, publicWatch } from "./lib/store.mjs";
 
@@ -270,7 +276,66 @@ const CONFIG = {
   maxTradeWatches: num(process.env.MAX_TRADE_WATCHES, 10, 1),
 
   autoTrade: autoTradeConfig(),
+  promotion: promotionConfig(),
 };
+
+/**
+ * Trap promotion.
+ *
+ * A trap watch that confirms currently hands the question back to a
+ * human. With this armed it instead computes the setup itself and
+ * registers it, which means a trap confirmation can end in an order with
+ * nobody in the loop. That is a bigger step than arming auto-trade — it
+ * removes the last human read — so it has its own switch, off by
+ * default, independent of AUTO_TRADE_ENABLED. Armed with auto-trade off,
+ * it still does something useful: the setup is registered and monitored,
+ * and the confirmation arrives as an actionable alert instead of a
+ * "re-run the pipeline" one.
+ *
+ * The displacement threshold here is the analysis pipeline's 3.0x, not
+ * the execution sequence's 1.8x. Different questions: 3.0x decides
+ * whether this move deserves a setup at all, 1.8x decides whether a
+ * setup that already exists is being entered at the right moment.
+ */
+function promotionConfig() {
+  return {
+    enabled: bool(process.env.AUTO_PROMOTE_TRAPS, false),
+    displacementMultiple: num(process.env.PROMOTE_DISPLACEMENT_MULTIPLE, 3, 1),
+    displacementWindow: num(process.env.PROMOTE_DISPLACEMENT_WINDOW, 20, 5),
+    minTrapScore: num(process.env.PROMOTE_MIN_TRAP_SCORE, 6, 0),
+    requireKillZone: process.env.PROMOTE_REQUIRE_KILL_ZONE !== "false",
+    killZoneLookaheadMinutes: num(process.env.PROMOTE_KILL_ZONE_LOOKAHEAD_MIN, 10, 0),
+    requireNewsClear: process.env.PROMOTE_REQUIRE_NEWS_CLEAR !== "false",
+    slBufferAtrFraction: num(process.env.PROMOTE_SL_BUFFER_ATR_FRACTION, 0.15, 0),
+    minRR: num(process.env.PROMOTE_MIN_RR, 1, 1),
+    expirationMinutes: num(process.env.PROMOTE_EXPIRATION_MINUTES, 120, 5),
+    riskPercent: finiteNumber(process.env.PROMOTE_RISK_PERCENT),
+    htfBars: num(process.env.PROMOTE_HTF_BARS, 60, 20),
+    ltfBars: num(process.env.PROMOTE_LTF_BARS, 120, 40),
+    // A promoted setup enters the same lifecycle a hand-registered one
+    // does, and by default it proves the same things. Promotion already
+    // removes the human read; making the entry faster in the same step
+    // would change two things at once and leave no way to tell which one
+    // was responsible for the outcome. The knobs exist for afterwards.
+    defenceProfile: DEFENCE_PROFILES.includes(String(process.env.PROMOTE_DEFENCE_PROFILE || "").toLowerCase())
+      ? String(process.env.PROMOTE_DEFENCE_PROFILE).toLowerCase()
+      : "standard",
+    urgency: URGENCIES.includes(String(process.env.PROMOTE_URGENCY || "").toUpperCase())
+      ? String(process.env.PROMOTE_URGENCY).toUpperCase()
+      : "NORMAL",
+    confirmationDeadlineMinutes: num(process.env.PROMOTE_CONFIRMATION_DEADLINE_MINUTES, 0, 0),
+  };
+}
+
+// One timeframe up, for the HTF target context.
+const NEXT_TIMEFRAME = Object.freeze({
+  M1: "M5",
+  M5: "M15",
+  M15: "H1",
+  M30: "H4",
+  H1: "H4",
+  H4: "D1",
+});
 
 /**
  * Auto-trade configuration.
@@ -2215,6 +2280,196 @@ async function executeConfirmedWatch(watch, context) {
 // displacement candle — and resolves by handing the question back to the
 // pipeline. It never emits an entry, a stop or a target.
 
+/**
+ * Record the first time the trap's flip level was reached at all — by a
+ * wick, by a live quote, by anything. Not a resolution: the trap keeps
+ * running, because a tagged flip level still is not a body close through
+ * it. It only closes the promotion gate.
+ */
+function noteInvalidationTouch(watch, low, high) {
+  if (watch.invalidationTouched) return;
+  const level = finiteNumber(watch.invalidation_level);
+  if (level === null) return;
+  const touched = watch.bias === "buy" ? low <= level : high >= level;
+  if (!touched) return;
+  watch.invalidationTouched = { at: new Date().toISOString(), price: level };
+  store.dirty = true;
+}
+
+/**
+ * Promotion — a confirmed trap becomes a registered setup.
+ *
+ * Runs at the moment the trap's own conditions are met, before it
+ * resolves, and returns a verdict either way. It never throws into the
+ * trap's resolution path: a promotion that fails leaves the trap
+ * resolving exactly as it did before, with the reason attached.
+ */
+async function attemptTrapPromotion(watch, { bars, symbolId, nowMs, news, tolerance }) {
+  const config = CONFIG.promotion;
+  // A per-trap flag can only ever narrow this. Registering a trap with
+  // auto_promote:true does not arm promotion — only the operator's
+  // environment does, exactly as with auto_trade.
+  const enabled = config.enabled && watch.auto_promote !== false;
+  const session = killZoneOutlook(nowMs, config.killZoneLookaheadMinutes);
+  const ratio = confirmingDisplacement(bars, { window: config.displacementWindow });
+
+  const gates = evaluatePromotionGates({
+    enabled,
+    enabledReason: config.enabled
+      ? "auto_promote is false for this trap"
+      : "AUTO_PROMOTE_TRAPS is not true",
+    session,
+    requireKillZone: config.requireKillZone,
+    killZoneLookaheadMinutes: config.killZoneLookaheadMinutes,
+    news,
+    requireNewsClear: config.requireNewsClear,
+    displacementRatio: ratio,
+    displacementMultiple: config.displacementMultiple,
+    trapScore: watch.trap_score,
+    minTrapScore: config.minTrapScore,
+    invalidationTouched: Boolean(watch.invalidationTouched),
+    invalidationTouchedPrice: watch.invalidationTouched?.price ?? null,
+  });
+
+  if (!gates.pass) {
+    return {
+      attempted: enabled,
+      promoted: false,
+      gates: gates.gates,
+      reason: gates.failedGates.map((gate) => `${gate.name}: ${gate.detail}`).join(" | "),
+      displacement_ratio: ratio,
+    };
+  }
+
+  // Context from one timeframe up, for the far target. Its absence is
+  // survivable — the LTF still supplies equilibrium and pooled liquidity
+  // — so a failed fetch narrows the target list rather than blocking.
+  let htfBars = [];
+  const htfTimeframe = NEXT_TIMEFRAME[watch.timeframe];
+  if (htfTimeframe) {
+    const raw = await market.bars(watch.symbol, symbolId, htfTimeframe, config.htfBars);
+    const series = closedSeries(raw || [], htfTimeframe, { nowMs, staleBars: 3 });
+    if (series.status === "OK") htfBars = series.bars;
+  }
+
+  const computed = computePromotedSetup({
+    bars,
+    htfBars,
+    direction: watch.bias,
+    triggerLevel: watch.trigger_level,
+    tolerance,
+    atr: calcATR(bars, 14),
+    minRR: config.minRR,
+    slBufferAtrFraction: config.slBufferAtrFraction,
+    timeframe: watch.timeframe,
+  });
+  if (!computed.ok) {
+    return {
+      attempted: true,
+      promoted: false,
+      gates: gates.gates,
+      reason: `geometry: ${computed.reason}`,
+      displacement_ratio: ratio,
+    };
+  }
+
+  const setup = computed.setup;
+
+  // The trap already declared where its own thesis dies — the flip level
+  // — and that is a different statement from where a trade derived from
+  // it would be stopped. Carrying it across is what lets the promoted
+  // setup tell the two apart: price reaching the computed stop opens the
+  // anti-SL branch, while price reaching the flip level ends the setup
+  // outright. Passed only when it sits on the correct side of the entry;
+  // a flip level the geometry has moved past is not a thesis line for
+  // this setup and registration would refuse it.
+  const flip = finiteNumber(watch.invalidation_level);
+  const thesisInvalidation =
+    flip !== null &&
+    (setup.direction === "buy" ? flip < setup.entry : flip > setup.entry)
+      ? flip
+      : undefined;
+
+  try {
+    const { watch: registered, duplicate } = createSetupWatch({
+      setup_id: `${watch.setup_id || watch.id}-promoted`,
+      symbol: watch.symbol,
+      direction: setup.direction,
+      entry: setup.entry,
+      entry_zone_low: setup.entry_zone_low,
+      entry_zone_high: setup.entry_zone_high,
+      sl: setup.sl,
+      thesis_invalidation: thesisInvalidation,
+      defence_profile: config.defenceProfile,
+      urgency: config.urgency,
+      confirmation_deadline_minutes: config.confirmationDeadlineMinutes || undefined,
+      tp1: setup.tp1,
+      tp2: setup.tp2,
+      tp3: setup.tp3,
+      setup_model: setup.setup_model,
+      conviction: watch.trap_score || "trap-promoted",
+      session: session.zone || session.next,
+      liquidity: setup.targets.map((target) => `${formatLevel(target.price)} (${target.label})`),
+      risk_percent: config.riskPercent ?? undefined,
+      expiration_minutes: config.expirationMinutes,
+      auto_trade: true,
+    });
+    return {
+      attempted: true,
+      promoted: !duplicate,
+      duplicate,
+      watch_id: registered.id,
+      gates: gates.gates,
+      setup: { ...setup, thesis_invalidation: thesisInvalidation ?? null },
+      defence_profile: config.defenceProfile,
+      displacement_ratio: ratio,
+    };
+  } catch (error) {
+    // Capacity, or a shape the registry refuses. Either way the trap
+    // still resolves and the human still gets told.
+    return {
+      attempted: true,
+      promoted: false,
+      gates: gates.gates,
+      reason: `registration refused: ${error.message}`,
+      setup,
+      displacement_ratio: ratio,
+    };
+  }
+}
+
+function promotionMessage(promotion) {
+  // Nothing was attempted, so nothing is reported: an operator who never
+  // armed promotion gets the same message v7 sent, unchanged.
+  if (!promotion || promotion.attempted === false) return "";
+  const gateLines = (promotion.gates || [])
+    .map((gate) => `${gate.pass ? "✓" : "✗"} ${htmlEscape(gate.name)} — ${htmlEscape(gate.detail)}`)
+    .join("\n");
+  if (promotion.promoted) {
+    const setup = promotion.setup;
+    return (
+      `\n<b>PROMOTED TO A LIVE SETUP</b>\n` +
+      `<b>Model:</b> ${htmlEscape(setup.setup_model)}\n` +
+      `<b>Entry:</b> ${htmlEscape(formatLevel(setup.entry))} ` +
+      `(zone ${htmlEscape(formatLevel(setup.entry_zone_low))}–${htmlEscape(formatLevel(setup.entry_zone_high))})\n` +
+      `<b>SL:</b> ${htmlEscape(formatLevel(setup.sl))} | ` +
+      `<b>TP1:</b> ${htmlEscape(formatLevel(setup.tp1))} (${htmlEscape(setup.rr.toFixed(2))}R)` +
+      (setup.tp2 ? ` | <b>TP2:</b> ${htmlEscape(formatLevel(setup.tp2))}` : "") +
+      (setup.tp3 ? ` | <b>TP3:</b> ${htmlEscape(formatLevel(setup.tp3))}` : "") +
+      `\n<b>Why:</b> ${htmlEscape(setup.rationale)}\n` +
+      `<b>Watch id:</b> ${htmlEscape(promotion.watch_id)}\n` +
+      `<b>Gates:</b>\n${gateLines}`
+    );
+  }
+  if (promotion.duplicate) {
+    return `\n<b>ALREADY PROMOTED</b>\nThis trap's setup is already being watched (${htmlEscape(promotion.watch_id)}).`;
+  }
+  return (
+    `\n<b>NOT PROMOTED</b>\n<b>Blocked by:</b> ${htmlEscape(promotion.reason || "unknown")}\n` +
+    (gateLines ? `<b>Gates:</b>\n${gateLines}` : "")
+  );
+}
+
 function trapHeader(watch) {
   return `<b>${htmlEscape(watch.symbol)}</b> — ${htmlEscape(watch.bias.toUpperCase())} bias · ${htmlEscape(watch.timeframe)}\n`;
 }
@@ -2274,6 +2529,7 @@ async function tickTrapWatch(watch) {
   }
   noteDataQuality(watch, true);
   watch.lastPrice = price;
+  noteInvalidationTouch(watch, price, price);
 
   const atr = calcATR(closed, 14);
   const approachDistance = Math.max(
@@ -2318,6 +2574,13 @@ async function tickTrapWatch(watch) {
   watch.lastEvaluatedCandle = key;
   watch.lastReason = "evaluating_closed_candle";
   store.dirty = true;
+
+  // Whether the flip level was ever reached, wick included. The trap
+  // itself only dies on a body close through it, and that is right for
+  // the read — but a promotion turns the read into money, and a read
+  // whose invalidation has already been tagged is not the clean one the
+  // analysis registered.
+  noteInvalidationTouch(watch, current.low, current.high);
 
   // The flip is tested first: if the read broke the other way, the
   // trigger is no longer the relevant question. Testing them in the other
@@ -2384,7 +2647,26 @@ async function tickTrapWatch(watch) {
   const session = killZoneStatus();
   const news = await newsStatusForWatch(watch);
   const ageHours = (now - watch.armedAtMs) / 3_600_000;
-  watch.lastReason = "conditions_met";
+
+  // The bridge. Before handing the question back to a human, try to
+  // answer it: recompute the geometry and register the setup. A refusal
+  // here changes nothing about the trap's own resolution — it just adds
+  // the reason to the message the human was getting anyway.
+  let promotion = null;
+  try {
+    promotion = await attemptTrapPromotion(watch, {
+      bars: closed,
+      symbolId,
+      nowMs: now,
+      news,
+      tolerance: priceTolerance(watch.symbol, price),
+    });
+  } catch (error) {
+    log(`trap ${watch.id} promotion failed safely: ${error.message}`);
+    promotion = { attempted: true, promoted: false, reason: `promotion errored: ${error.message}` };
+  }
+
+  watch.lastReason = promotion?.promoted ? "conditions_met_promoted" : "conditions_met";
   resolveWatch(
     watch,
     "CONDITIONS_MET",
@@ -2395,9 +2677,12 @@ async function tickTrapWatch(watch) {
       fvg,
       session,
       news,
+      promotion,
       context_age_hours: Number(ageHours.toFixed(2)),
     },
-    `<b>TRAP CONDITIONS MET — RE-RUN THE PIPELINE</b>\n` +
+    (promotion?.promoted
+      ? `<b>TRAP CONDITIONS MET — SETUP REGISTERED</b>\n`
+      : `<b>TRAP CONDITIONS MET — RE-RUN THE PIPELINE</b>\n`) +
       trapHeader(watch) +
       `<b>${htmlEscape(watch.timeframe)} close:</b> ${htmlEscape(formatLevel(current.close))} beyond ${htmlEscape(formatLevel(watch.trigger_level))}\n` +
       (displacement.present
@@ -2412,8 +2697,10 @@ async function tickTrapWatch(watch) {
       `<b>News:</b> ${htmlEscape(news.blocked ? news.reason : "clear")}\n` +
       `<b>Context age:</b> ${htmlEscape(ageHours.toFixed(1))}h` +
       (ageHours > 8 ? ` — <b>stale, re-derive every level from live data</b>` : "") +
-      `\n<b>Action:</b> re-run the sniper pipeline on ${htmlEscape(watch.symbol)}. ` +
-      `This watch produces no entry, SL or TP.`,
+      (promotion?.promoted
+        ? promotionMessage(promotion)
+        : `\n<b>Action:</b> re-run the sniper pipeline on ${htmlEscape(watch.symbol)}. ` +
+          `This trap watch produces no entry, SL or TP.` + promotionMessage(promotion)),
   );
 }
 
@@ -2655,6 +2942,11 @@ const CUSTOM_TOOLS = [
         invalidation_level: { type: "number" },
         require_displacement: { type: "boolean" },
         require_fvg: { type: "boolean" },
+        auto_promote: {
+          type: "boolean",
+          description:
+            "Set false to keep this trap purely informational — it will notify on confirmation but never be promoted into a live setup, even while promotion is armed. Setting true does not arm promotion; only the operator's environment can do that.",
+        },
         trap_sub_type: { type: "string" },
         trap_active: { type: "string" },
         trap_score: { type: "string" },
@@ -2945,6 +3237,34 @@ async function autoTradeReport() {
       max_slippage_risk_fraction: config.maxSlippageRiskFraction,
       max_attempts: config.maxAttempts,
       symbol_allowlist: [...config.symbolAllowlist],
+      symbol_allowlist_meaning:
+        config.symbolAllowlist.size === 0
+          ? "empty — every symbol is permitted; set AUTO_TRADE_SYMBOLS to restrict"
+          : "only these symbols may be executed",
+    },
+    trap_promotion: {
+      enabled: CONFIG.promotion.enabled,
+      note: CONFIG.promotion.enabled
+        ? "a confirmed trap watch is recomputed into a setup and registered automatically"
+        : "confirmed trap watches notify only; set AUTO_PROMOTE_TRAPS=true to promote them",
+      displacement_multiple: CONFIG.promotion.displacementMultiple,
+      displacement_window: CONFIG.promotion.displacementWindow,
+      min_trap_score: `${CONFIG.promotion.minTrapScore}/9`,
+      require_kill_zone: CONFIG.promotion.requireKillZone,
+      kill_zone_lookahead_minutes: CONFIG.promotion.killZoneLookaheadMinutes,
+      require_news_clear: CONFIG.promotion.requireNewsClear,
+      min_rr: CONFIG.promotion.minRR,
+      sl_buffer_atr_fraction: CONFIG.promotion.slBufferAtrFraction,
+      expiration_minutes: CONFIG.promotion.expirationMinutes,
+      risk_percent: CONFIG.promotion.riskPercent ?? config.riskPercent,
+      gates: [
+        "auto_promote_enabled",
+        "kill_zone",
+        "news",
+        "displacement",
+        "trap_score",
+        "invalidation_untouched",
+      ],
     },
     entry_sequence: {
       required: CONFIG.entrySequenceRequired,
@@ -2978,9 +3298,10 @@ async function autoTradeReport() {
 
 function monitorHealth() {
   return {
-    schema: "watch-monitor/7.2",
+    schema: "watch-monitor/7.3",
     auto_trade: autoTradeStatus(),
     auto_trade_dry_run: CONFIG.autoTrade.dryRun,
+    auto_promote_traps: CONFIG.promotion.enabled,
     trades_today: tradesToday(Date.now()),
     execution: executor.snapshot(),
     recovered_at: store.recoveredAt,
@@ -3446,7 +3767,7 @@ async function handleMcpRequest(req, res) {
       result: {
         protocolVersion: body.params?.protocolVersion || CONFIG.protocolVersion,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "cTrader + Watch Monitor MCP", version: "7.2.0" },
+        serverInfo: { name: "cTrader + Watch Monitor MCP", version: "7.3.0" },
       },
     });
     return;
@@ -3529,7 +3850,7 @@ app.get("/health", (req, res) => {
   const base = {
     status: "ok",
     service: "watch-monitor-mcp",
-    version: "7.0.0",
+    version: "7.1.0",
     watches: store.setups.size,
     trap_watches: store.traps.size,
     uptime_seconds: Math.floor(process.uptime()),
@@ -3650,6 +3971,13 @@ function boot() {
       : `auto-trade is OFF (${auto.reason}); confirmations will be notified, not executed`,
   );
   if (auto.armed) void executor.resolveTools(true);
+  log(
+    CONFIG.promotion.enabled
+      ? `TRAP PROMOTION ARMED: confirmed traps are recomputed into setups ` +
+          `(displacement ≥${CONFIG.promotion.displacementMultiple}x, trap score ≥${CONFIG.promotion.minTrapScore}/9, ` +
+          `min ${CONFIG.promotion.minRR}R)`
+      : "trap promotion is OFF; confirmed traps notify only",
+  );
 
   const recovery = store.load();
   notifier.restore(recovery.outbox);
