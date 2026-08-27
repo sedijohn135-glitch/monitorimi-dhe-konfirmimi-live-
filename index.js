@@ -54,7 +54,6 @@ import {
   ANTI_SL_DEFAULTS,
   DEFENCE_PROFILES,
   PERIOD_MS,
-  SKILL_CONTEXT_CONDITIONS,
   SKILL_CONTEXT_LIMITS,
   SKILL_CONVICTIONS,
   SKILL_TRAP_PHASES,
@@ -64,7 +63,6 @@ import {
   advanceGeneration,
   advanceSlExcursion,
   appendTrail,
-  applySkillContext,
   barClosedAfter,
   barKey,
   bodyClosedBeyond,
@@ -210,10 +208,15 @@ const CONFIG = {
   authToken: String(process.env.WATCH_MONITOR_AUTH_TOKEN || ""),
   allowedOrigin: process.env.ALLOWED_ORIGIN || "*",
 
-  // The post-touch confirmation sequence. Required by default: the whole
-  // point of the sequence is that a touch, a wick, or a single bearish
-  // candle is not an entry.
-  entrySequenceRequired: process.env.ENTRY_SEQUENCE_REQUIRED !== "false",
+  // The post-touch confirmation sequence. OFF by default, which restores
+  // the confirmation this monitor shipped with and which its operator
+  // reports as the one that worked: live acceptance plus at least one
+  // graduated technical signal, each held under observation across a bar
+  // boundary. The sequence was added later and made entries five to
+  // fifteen minutes later still; it remains available, per setup through
+  // `defence_profile` and service-wide here, for anyone who wants a
+  // structural proof on top. Set true to require it again.
+  entrySequenceRequired: process.env.ENTRY_SEQUENCE_REQUIRED === "true",
   entryDisplacementMultiple: num(process.env.ENTRY_DISPLACEMENT_MULTIPLE, 1.8, 1.1),
   entryDisplacementLookback: num(process.env.ENTRY_DISPLACEMENT_LOOKBACK, 10, 5),
   entryMssSwingStrength: num(process.env.ENTRY_MSS_SWING_STRENGTH, 2, 1),
@@ -223,9 +226,12 @@ const CONFIG = {
   // recording it is always on — that is the audit trail. Letting it
   // shorten the confirmation path is separately switchable, because it
   // is the only thing here that changes when an entry is taken.
+  // The analyst's context is recorded and audited; it changes no
+  // decision. `holdFloorMs` is the floor urgency cannot go below, and the
+  // R thresholds still describe where price went after the touch, which
+  // the M1 defence profile reads before it will accept M1 proof.
   skillContext: {
     enabled: process.env.SKILL_CONTEXT_ENABLED !== "false",
-    fastLaneEnabled: process.env.SKILL_CONTEXT_FAST_LANE_ENABLED !== "false",
     holdFloorMs: num(process.env.SKILL_CONTEXT_MIN_HOLD_FLOOR_MS, SKILL_CONTEXT_LIMITS.holdFloorMs, 5000),
     m1MinBarsAfterTouch: num(process.env.SKILL_CONTEXT_M1_MIN_BARS, 2, 1),
     favorableR: num(process.env.SKILL_CONTEXT_FAVORABLE_R, 0.15, 0.05),
@@ -590,22 +596,14 @@ function confirmWatch(watch, price, result, gates) {
   );
 }
 
-/** One line naming the lane an entry came through, for the log. */
+/** One line naming what actually proved this entry, for the log. */
 function skillPathLine(watch) {
-  const state = watch.skillContextState;
-  if (!watch.skill_context) return "standard post-touch M5 sequence (no skill context)";
-  if (!state || state.lane === "STANDARD") {
-    return `standard post-touch M5 sequence · skill conviction ${watch.skill_context.conviction}` +
-      (state?.blocked?.length ? ` · fast lane refused: ${state.blocked[0]}` : "");
-  }
-  const m1 = state.m1Continuation || {};
-  return (
-    `${state.lane} · skill conviction ${watch.skill_context.conviction} · ` +
-    `forward ${state.forwardState}` +
-    (Number.isFinite(state.forward?.progressR) ? ` (${state.forward.progressR.toFixed(2)}R)` : "") +
-    ` · M1 MSS ${m1.mss?.present ? "yes" : "no"}, M1 displacement ${m1.displacement?.present ? "yes" : "no"}` +
-    ` over ${m1.barsAfterTouch ?? 0} post-touch bar(s) · hold ${state.holdMs}ms`
-  );
+  const profile = watch.defenceState?.profile || watch.defence_profile || "standard";
+  const sequence = CONFIG.entrySequenceRequired
+    ? `${profile} defence sequence`
+    : "evidence only (post-touch sequence not required)";
+  const conviction = watch.skill_context?.conviction;
+  return conviction ? `${sequence} · analyst conviction ${conviction}` : sequence;
 }
 
 /**
@@ -646,20 +644,15 @@ function executionLogLines(watch, execution) {
  */
 function entryEvidenceSummary(watch) {
   const side = watch.direction === "buy" ? "bullish" : "bearish";
-  const lane = watch.skillContextState?.lane;
-  if (lane === "M1_FAST" || lane === "SKILL_VALIDATED") {
-    return [
-      `skill context (${watch.skill_context?.conviction || "MEDIUM"} conviction, ${lane.toLowerCase()} lane)`,
-      `M1 ${side} MSS after the touch`,
-      `M1 ${side} displacement`,
-      `forward validation ${watch.skillContextState?.forwardState}`,
-    ].join(" + ");
+  const profile = watch.defenceState?.profile || watch.defence_profile || "standard";
+  const parts = [];
+  if (CONFIG.entrySequenceRequired) {
+    parts.push("Entry zone rejection");
+    if (profile === "m1_continuation") parts.push(`M1 ${side} MSS after the touch`, `M1 ${side} displacement`);
+    else if (profile === "rejection_displacement") parts.push(`${side} displacement`);
+    else parts.push(`M5 ${side} MSS`, `${side} displacement`);
   }
-  return [
-    "Entry zone rejection",
-    `M5 ${side} MSS`,
-    `${side} displacement`,
-  ].join(" + ");
+  return parts.concat(watch.lastSignals || []).join(" + ") || "live evidence";
 }
 
 function executedWatch(watch, execution) {
@@ -1084,85 +1077,6 @@ const SMT_BUNDLES = {
   EURUSD: [{ symbol: "GBPUSD" }],
   GBPUSD: [{ symbol: "EURUSD" }],
 };
-
-/**
- * The skill-context decision for this tick.
- *
- * Forward validation asks the one question the analysis could not
- * answer: what did price actually do after the touch? Combined with the
- * M1 continuation proof, that answer decides whether the skill's
- * pre-touch conclusions are still worth anything — and the whole thing
- * collapses to "standard sequence, standard hold" whenever no context
- * was sent, the context has expired, or price went the wrong way.
- */
-function decideSkillContext(watch, { forward, m1Continuation, baseHoldMs, nowMs }) {
-  const context = watch.skill_context || null;
-  const base = {
-    lane: "STANDARD",
-    holdMs: baseHoldMs,
-    requireSequence: CONFIG.entrySequenceRequired,
-    forwardState: forward?.state ?? null,
-    forward,
-    m1Continuation,
-    eligible: false,
-    reasons: [],
-    blocked: [],
-    baseHoldMs,
-    updatedAt: new Date(nowMs).toISOString(),
-  };
-  if (!context || !CONFIG.skillContext.enabled) return base;
-
-  const contextAgeMs = skillContextAgeMs(context, nowMs);
-  const decision = applySkillContext(
-    context,
-    { forwardState: forward.state, m1Continuation },
-    {
-      enabled: CONFIG.skillContext.enabled,
-      fastLaneEnabled: CONFIG.skillContext.fastLaneEnabled,
-      minHoldMs: baseHoldMs,
-      holdFloorMs: CONFIG.skillContext.holdFloorMs,
-      sequenceRequired: CONFIG.entrySequenceRequired,
-    },
-  );
-  return {
-    ...decision,
-    forward,
-    m1Continuation,
-    contextAgeMs,
-    baseHoldMs,
-    updatedAt: new Date(nowMs).toISOString(),
-  };
-}
-
-/**
- * One message, once, when a context that asked for a shortened path
- * loses it. Silence here is the worst option available: the analyst
- * would go on believing the fast lane was taken while the monitor
- * quietly fell back to the full sequence, and the two would disagree
- * about why the entry came late.
- */
-function noteSkillContextStale(watch, skill) {
-  const context = watch.skill_context;
-  if (!context) return;
-  const state = skill.forwardState;
-  if (state !== "STALE" && state !== "FAILED") return;
-  const askedForSomething =
-    context.skip_m5_sequence_if !== "never" ||
-    context.require_m1_only_if !== "never" ||
-    (context.suggested_min_hold_ms !== null && context.suggested_min_hold_ms < CONFIG.minConfirmationHoldMs);
-  if (!askedForSomething) return;
-  if (watch.skillContextNotified === state) return;
-  watch.skillContextNotified = state;
-  store.dirty = true;
-  notify(
-    `<b>SKILL FAST LANE REFUSED — ${htmlEscape(state)}</b>\n` +
-      `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(watch.direction.toUpperCase())} — ` +
-      `conviction ${htmlEscape(context.conviction)}\n` +
-      `<b>Reason:</b> ${htmlEscape(skill.forward?.detail || state)}\n` +
-      `<i>The watch keeps running on the full post-touch sequence; nothing about its stop or invalidation changed.</i>`,
-    { dedupeKey: `${watch.id}:skill:${state}` },
-  );
-}
 
 async function tickSetupWatch(watch) {
   const now = Date.now();
@@ -1723,7 +1637,7 @@ async function tickSetupWatch(watch) {
     nowMs: now,
     touchedAtMs,
     contextAgeMs: skillContextAgeMs(watch.skill_context, now),
-    maxAgeMs: watch.skill_context?.suggested_max_age_ms ?? SKILL_CONTEXT_LIMITS.defaultMaxAgeMs,
+    maxAgeMs: SKILL_CONTEXT_LIMITS.defaultMaxAgeMs,
     thresholds: {
       favorableR: CONFIG.skillContext.favorableR,
       strongR: CONFIG.skillContext.strongR,
@@ -1748,15 +1662,6 @@ async function tickSetupWatch(watch) {
     CONFIG.skillContext.holdFloorMs,
   );
 
-  const skill = decideSkillContext(watch, {
-    forward,
-    m1Continuation,
-    baseHoldMs,
-    nowMs: now,
-  });
-  watch.skillContextState = skill;
-  noteSkillContextStale(watch, skill);
-
   // §22/§26 — what this particular setup has to prove, as the analyst
   // declared it, rather than one universal gate applied to every setup.
   const defence = defenceSatisfied(watch.defence_profile, {
@@ -1765,8 +1670,7 @@ async function tickSetupWatch(watch) {
     forwardState: forward.state,
   });
   watch.defenceState = { ...defence, forwardState: forward.state };
-  const sequenceReady =
-    !CONFIG.entrySequenceRequired || defence.satisfied || skill.requireSequence === false;
+  const sequenceReady = !CONFIG.entrySequenceRequired || defence.satisfied;
 
   const result = evaluateConfirmation(watch, signals, {
     mid,
@@ -1774,7 +1678,7 @@ async function tickSetupWatch(watch) {
     nowMs: now,
     generation: watch.generation.generation,
     hasBarTime: watch.generation.hasBarTime,
-    minHoldMs: skill.holdMs,
+    minHoldMs: baseHoldMs,
     requireNewBar: CONFIG.requireNewBar,
   });
   watch.evidence = result.evidence;
@@ -1793,7 +1697,7 @@ async function tickSetupWatch(watch) {
       // report this as "confirmed in time and held by a gate".
       watch.technicalConfirmationAtMs = null;
     } else if (!sequenceReady) {
-      watch.lastReason = skill.eligible ? "awaiting_m1_continuation" : defence.reason;
+      watch.lastReason = defence.reason;
     } else {
       watch.lastReason = "evidence_pending";
     }
@@ -1808,7 +1712,7 @@ async function tickSetupWatch(watch) {
     record(
       watch,
       "defence_confirmed",
-      { profile: defence.profile, lane: skill.lane, signals: result.signals, forward: forward.state },
+      { profile: defence.profile, signals: result.signals, forward: forward.state },
       now,
     );
   }
@@ -1857,11 +1761,10 @@ async function tickSetupWatch(watch) {
       decisionMs: Date.now() - now,
       // `latestCloseMs` is already the bar's close time, not its open.
       marketToDecisionMs: Number.isFinite(m1.latestCloseMs) ? Date.now() - m1.latestCloseMs : null,
-      holdMs: skill.holdMs,
-      lane: skill.lane,
+      holdMs: baseHoldMs,
       profile: defence.profile,
     };
-    record(watch, "enter_now", { price: mid, lane: skill.lane, profile: defence.profile, latency: watch.latency }, now);
+    record(watch, "enter_now", { price: mid, profile: defence.profile, latency: watch.latency }, now);
     store.dirty = true;
 
     const auto = autoTradeStatus();
@@ -2914,7 +2817,7 @@ const CUSTOM_TOOLS = [
           type: "object",
           additionalProperties: false,
           description:
-            "What the analysis already proved before this watch existed, so the monitor does not spend five to fifteen minutes re-deriving it after the touch. It is advisory: it can shorten the confirmation path within hard bounds and it can never place a trade on its own. The fast lane still requires a market-structure shift and displacement on closed bars that closed after the touch — on M1 instead of M5 — and every safety check is unaffected. Omit it entirely and the monitor behaves exactly as before.",
+            "What the analysis concluded, recorded alongside the setup and scored against the outcome by get_skill_context_audit. It changes NO confirmation decision — every setup confirms the same way, which is the only way the operator can predict it. An earlier version let this block request a shortened confirmation path; that path could not open in practice, because the analysis was always past its own freshness window before price returned to the zone, and all it produced was a Telegram message announcing the refusal. Send it for calibration, not for speed.",
           properties: {
             htf_mss_confirmed: { type: "boolean", description: "A higher-timeframe market-structure shift was read on D1/H4/H1." },
             htf_mss_at: { type: "number", description: "Price level of that HTF shift." },
@@ -2942,25 +2845,6 @@ const CUSTOM_TOOLS = [
               type: "string",
               enum: [...SKILL_CONVICTIONS],
               description: "Only HIGH can shorten the confirmation hold. Anything unrecognised is read as MEDIUM.",
-            },
-            suggested_min_hold_ms: {
-              type: "number",
-              description: `Requested evidence hold. Lengthening is always honoured; shortening needs HIGH conviction and never goes below the ${SKILL_CONTEXT_LIMITS.holdFloorMs}ms floor.`,
-            },
-            suggested_max_age_ms: {
-              type: "number",
-              description: `How long this analysis stays fresh. After it, the context confers nothing and the standard sequence applies. Defaults to ${SKILL_CONTEXT_LIMITS.defaultMaxAgeMs}ms, capped at ${SKILL_CONTEXT_LIMITS.maxAgeCapMs}ms.`,
-            },
-            skip_m5_sequence_if: {
-              type: "string",
-              enum: [...SKILL_CONTEXT_CONDITIONS],
-              description:
-                "Which of this context's own claims, if true, replaces the post-touch M5 sequence with M1 continuation. Defaults to never: absent means nothing changes.",
-            },
-            require_m1_only_if: {
-              type: "string",
-              enum: [...SKILL_CONTEXT_CONDITIONS],
-              description: "Same conditions, same effect; declare either or both.",
             },
             expected_displacement_tf: { type: "string" },
             analysis_at_ms: { type: "number", description: "When the analysis was made. Defaults to the freshest claim in this context, then to registration time." },
@@ -3393,73 +3277,46 @@ function monitorHealth() {
 // skill's side, to one that was honoured, and the skill would keep
 // sending it.
 
-function skillContextRequestedFastLane(context) {
-  if (!context) return false;
-  return context.skip_m5_sequence_if !== "never" || context.require_m1_only_if !== "never";
+function confirmationPath() {
+  return CONFIG.entrySequenceRequired
+    ? "rejection → structure shift → displacement, then live evidence"
+    : "live acceptance + a graduated technical signal";
 }
 
 function skillContextSummary(context) {
-  if (!context) {
-    return {
-      headline: "none sent",
-      path: "rejection → M5 structure shift → displacement",
-    };
-  }
-  const wants = skillContextRequestedFastLane(context);
-  const available = CONFIG.skillContext.enabled && CONFIG.skillContext.fastLaneEnabled;
+  if (!context) return { headline: "none sent", path: confirmationPath() };
   const parts = [`conviction ${context.conviction}`];
   if (context.trap_phase) parts.push(`trap ${context.trap_phase}`);
   if (context.htf_mss_confirmed) parts.push("HTF MSS confirmed");
   if (context.liquidity_swept) parts.push("liquidity swept");
   if (context.m5_mss_already_observed) parts.push("M5 MSS already observed");
-  if (context.direction_conflict) parts.push("HTF BIAS CONFLICT — fast lane refused");
-  return {
-    headline: parts.join(" · "),
-    path:
-      wants && available && !context.direction_conflict
-        ? "either rejection → M5 structure shift → displacement, or M1 structure shift + displacement on the skill-context fast lane"
-        : "rejection → M5 structure shift → displacement",
-  };
+  if (context.direction_conflict) parts.push("HTF BIAS CONFLICT");
+  return { headline: parts.join(" · "), path: confirmationPath() };
 }
 
+/**
+ * What the context is worth, stated plainly: it is recorded and scored,
+ * and it changes nothing. Saying so in the registration reply is the
+ * point — the previous version reported a lane the analyst could request
+ * and the monitor would then refuse, which read as a fault every time.
+ */
 function skillContextReport(watch) {
   const context = watch.skill_context;
   if (!context) {
     return {
       accepted: false,
-      note: "No skill_context was sent. The standard post-touch M5 sequence applies, unchanged.",
+      note: `No skill_context was sent. Confirmation is ${confirmationPath()}, the same as for every setup.`,
     };
-  }
-  const wants = skillContextRequestedFastLane(context);
-  const available = CONFIG.skillContext.enabled && CONFIG.skillContext.fastLaneEnabled;
-  const refusals = [];
-  if (!CONFIG.skillContext.enabled) refusals.push("skill context is disabled on this monitor");
-  else if (!CONFIG.skillContext.fastLaneEnabled) refusals.push("the fast lane is disabled on this monitor");
-  if (context.direction_conflict) {
-    refusals.push(`htf_bias=${context.htf_bias} disagrees with a ${watch.direction} setup`);
   }
   return {
     accepted: true,
     conviction: context.conviction,
     trap_phase: context.trap_phase,
-    fast_lane_requested: wants,
-    fast_lane_available: Boolean(wants && available && !context.direction_conflict),
-    fast_lane_refused_because: refusals.length ? refusals : null,
-    freshness_window_ms: context.suggested_max_age_ms,
-    hold_floor_ms: CONFIG.skillContext.holdFloorMs,
-    effective_hold_ms:
-      context.suggested_min_hold_ms === null
-        ? CONFIG.minConfirmationHoldMs
-        : context.suggested_min_hold_ms >= CONFIG.minConfirmationHoldMs
-          ? context.suggested_min_hold_ms
-          : context.conviction === "HIGH"
-            ? Math.max(context.suggested_min_hold_ms, CONFIG.skillContext.holdFloorMs)
-            : CONFIG.minConfirmationHoldMs,
+    direction_conflict: context.direction_conflict,
+    confirmation_path: confirmationPath(),
+    effect_on_confirmation: "none — the context is recorded and audited, not acted on",
+    audit: "get_skill_context_audit scores each claim against what the market then did",
     warnings: context.warnings?.length ? context.warnings : null,
-    note:
-      "The fast lane replaces the post-touch M5 sequence with an M1 structure shift and displacement " +
-      "proven on bars that closed after the touch. It never replaces proof with the claim itself, it " +
-      "expires with the freshness window, and it confers nothing once price moves against the setup.",
   };
 }
 
@@ -3611,7 +3468,6 @@ async function handleCustomTool(name, args = {}) {
     return textResult({
       configuration: {
         enabled: CONFIG.skillContext.enabled,
-        fast_lane_enabled: CONFIG.skillContext.fastLaneEnabled,
         hold_floor_ms: CONFIG.skillContext.holdFloorMs,
         base_hold_ms: CONFIG.minConfirmationHoldMs,
         m1_min_bars_after_touch: CONFIG.skillContext.m1MinBarsAfterTouch,
@@ -3640,11 +3496,7 @@ async function handleCustomTool(name, args = {}) {
           direction: watch.direction,
           stage: stageOf(watch),
           conviction: watch.skill_context.conviction,
-          lane: watch.skillContextState?.lane || "STANDARD",
-          forward_state: watch.skillContextState?.forwardState || null,
-          fast_lane_blocked: watch.skillContextState?.blocked?.length
-            ? watch.skillContextState.blocked
-            : null,
+          defence_profile: watch.defenceState?.profile || watch.defence_profile || "standard",
           warnings: watch.skill_context.warnings?.length ? watch.skill_context.warnings : null,
         })),
     });

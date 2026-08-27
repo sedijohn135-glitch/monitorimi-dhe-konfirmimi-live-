@@ -273,10 +273,6 @@
     "m5_mss_at_ms": 1787353969602,
     "htf_bias": "bullish",
     "conviction": "HIGH",
-    "suggested_min_hold_ms": 15000,
-    "suggested_max_age_ms": 180000,
-    "skip_m5_sequence_if": "m5_mss_already_observed",
-    "require_m1_only_if": "m5_mss_already_observed",
     "expected_displacement_tf": "M5",
     "analysis_at_ms": 1787353969602,
     "note": "London sweep i Asia low, delivery drejt NY AM"

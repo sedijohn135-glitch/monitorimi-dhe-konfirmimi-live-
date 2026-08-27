@@ -107,10 +107,6 @@ SKILL_CONTEXT_FIELDS = {
     "m5_mss_at_ms": "kur printoi M5 MSS (epoch ms)",
     "htf_bias": "ilos_state.bias",
     "conviction": "ilos_state.confidence (HIGH/MEDIUM/LOW)",
-    "suggested_min_hold_ms": "sa gjatë duhet mbajtur evidenca (zgjatja pranohet gjithmonë)",
-    "suggested_max_age_ms": "sa gjatë qëndron e freskët analiza",
-    "skip_m5_sequence_if": "cili pretendim e zëvendëson sekuencën M5",
-    "require_m1_only_if": "po ashtu, për verifikim vetëm M1",
     "expected_displacement_tf": "execution / structure — TF ku pritet displacement",
     "analysis_at_ms": "kur u bë analiza (epoch ms)",
     "note": "shënim i lirë — hyn i plotë në audit",
@@ -453,6 +449,7 @@ def print_skill_context_report(skill_context: dict) -> None:
         return
 
     print(f"  ✅ register_watch pranon skill_context — {len(skill_context['accepted_fields'])} fusha")
+    print("     ⓘ  Konteksti REGJISTROHET dhe auditohet; nuk ndryshon asnjë vendim konfirmimi.")
     for field in skill_context["accepted_fields"]:
         print(f"     · {field}  ←  {SKILL_CONTEXT_FIELDS[field]}")
     if skill_context["missing_fields"]:
