@@ -1,13 +1,16 @@
-# Watch Monitor MCP — v7.2
+# Watch Monitor MCP — v7.3
 
 An MCP server that monitors ICT sniper setups and `TRAP_NOT_CONFIRMED`
 reads to a deterministic conclusion, notifies a human over Telegram, and
 — when auto-trade is explicitly armed — **submits the entry order
 itself** the moment the confirmation sequence completes.
 
-Auto-trade is **off by default**. With it off, v7 behaves exactly like
-v6: it watches, it confirms, it tells you, and it never touches the
-account.
+It can also promote a confirmed trap watch into a live setup on its own,
+closing the last manual step in the chain.
+
+Both are **off by default**, under separate switches. With both off it
+behaves exactly like v6: it watches, it confirms, it tells you, and it
+never touches the account.
 
 ## The setup lifecycle
 
@@ -106,6 +109,57 @@ later does not mean the old setup was right.
 Turn the branch off with `ANTI_SL_ENABLED=false` and price reaching the
 stop before entry kills the setup outright, as it used to.
 
+### From a trap straight into a setup
+
+A trap watch used to prove one thing and stop: the level was taken with
+delivery. Turning that into something tradeable meant re-running the
+analysis by hand and registering a setup — and by the time that happened
+the entry zone had often been and gone.
+
+With `AUTO_PROMOTE_TRAPS=true` the monitor closes that gap itself:
+
+```
+TRAP CONFIRMED  →  geometry recomputed  →  SETUP REGISTERED
+                                                  ↓
+                                    the ordinary lifecycle, unchanged:
+                                    touch → defence → gates → ENTER NOW
+```
+
+What comes out is an **ordinary setup**. It is touched, it proves the
+same defence, it passes the same gates, and it is refused by the same
+entry-opportunity and anti-SL rules. Promotion removes the human *read*
+between the trap and the setup; it removes nothing from the confirmation
+that follows.
+
+Six binary gates decide whether a confirmed trap is promoted at all, and
+**every unknown fails** — an unmeasurable ratio, a missing trap score, an
+unreadable feed:
+
+| Gate | Passes when |
+|---|---|
+| `auto_promote_enabled` | promotion is armed and this trap did not opt out |
+| `kill_zone` | a zone is open or opens within the lookahead; never NY lunch or the weekend |
+| `news` | no lockout and no high-impact event in the blackout window |
+| `displacement` | the **confirming candle itself** carries ≥ `PROMOTE_DISPLACEMENT_MULTIPLE` |
+| `trap_score` | the recorded score, normalised to /9, is at least `PROMOTE_MIN_TRAP_SCORE` |
+| `invalidation_untouched` | the flip level has not been reached, wicks included |
+
+The trap's **flip level becomes the setup's `thesis_invalidation`**, and
+the recomputed stop stays the stop. That is what lets a promoted setup
+tell the two apart: price reaching the stop opens the anti-SL branch,
+price reaching the flip level ends the setup.
+
+`AUTO_PROMOTE_TRAPS` is the only thing that arms promotion — a trap's own
+`auto_promote: true` does **not** opt in, so a client registering a trap
+can never escalate past the operator's environment. `auto_promote: false`
+opts a single trap out.
+
+By default a promoted setup proves exactly what a hand-registered one
+proves. `PROMOTE_DEFENCE_PROFILE` and `PROMOTE_URGENCY` can speed it up
+afterwards — deliberately left for afterwards, because promotion already
+removes the human read, and changing both at once leaves no way to tell
+which one was responsible for the outcome.
+
 ### When the entry runs away
 
 Price reaching TP1 without you, or a confirmation that arrives with price
@@ -194,6 +248,92 @@ against standard-sequence ones before the lane is widened.
 
 Full contract, including what the skill should send and how to read the
 result back: [`docs/skill-context.md`](docs/skill-context.md).
+
+## Trap promotion
+
+A trap watch answers one falsifiable question — did the level get taken
+with delivery — and then hands the question back to a human, who re-runs
+the analysis and registers a setup. With `AUTO_PROMOTE_TRAPS=true` the
+server closes that gap itself: on confirmation it recomputes the
+geometry and registers the setup, so trap → setup → entry → order runs
+with nobody in the loop.
+
+That is a bigger step than arming auto-trade, because it removes the last
+human read. It has its own switch, off by default, independent of
+`AUTO_TRADE_ENABLED`. Armed with auto-trade off it still earns its keep:
+the setup is registered and monitored, and the confirmation arrives as an
+actionable alert with levels instead of a "re-run the pipeline" one.
+
+### The hard gates
+
+Not the 23-item scored checklist — scoring is judgement, and judgement
+nobody reads is not judgement. What runs is the load-bearing binary
+subset, and **every one of them must pass**:
+
+| Gate | Passes when |
+|---|---|
+| `auto_promote_enabled` | promotion is armed and this trap did not opt out |
+| `kill_zone` | a kill zone is open, or opens within `PROMOTE_KILL_ZONE_LOOKAHEAD_MIN` — never in NY lunch or at the weekend |
+| `news` | no manual lockout and no high-impact event inside the blackout window |
+| `displacement` | the **confirming candle itself** carries ≥ `PROMOTE_DISPLACEMENT_MULTIPLE` (default 3.0x) against its own 20-bar trailing average |
+| `trap_score` | the trap's recorded score, normalised to /9, is at or above `PROMOTE_MIN_TRAP_SCORE` |
+| `invalidation_untouched` | the trap's flip level has not been reached, wick included |
+
+A gate whose input cannot be read fails. An unmeasurable displacement
+ratio, a missing `trap_score`, an unreadable news feed — each is a no,
+because this decision creates orders and an unanswerable question is not
+a yes. Register traps with a score the parser can read (`"7/9"`,
+`"Grade B (6/9)"`, `"7"`) or they will never promote.
+
+The displacement threshold here is the analysis pipeline's **3.0x**, not
+the execution sequence's 1.8x. They answer different questions: 3.0x
+decides whether this move deserves a setup at all, 1.8x decides whether a
+setup that already exists is being entered at the right moment. The
+looser one still runs downstream, on top of this.
+
+### The geometry
+
+Computed with the same primitives as `scripts/ict_levels.py`, ported to
+`lib/ict.mjs` — strict 3-candle swings, body-close structure breaks, FVGs
+with CE and penetration:
+
+- **Entry** is a PDA array, never the level price just displaced through:
+  the nearest unfilled FVG's CE first, the order block's mean threshold
+  second, the trigger level as a breaker retest only if neither exists.
+  The array's bounds become the setup's `entry_zone_low`/`high`.
+- **Stop** goes beyond the nearest strict swing on the far side of the
+  zone, plus a `PROMOTE_SL_BUFFER_ATR_FRACTION` buffer.
+- **Targets** are real levels, nearest first: the working range's
+  equilibrium, pooled EQH/EQL, swing liquidity, then the higher
+  timeframe's range. Each is at least half an R past the last.
+- **TP1 must clear `PROMOTE_MIN_RR`** (default 1R) or the promotion is
+  refused — a trap that has run out of room is not a setup.
+
+Every refusal names what stopped it, in the same spirit as a trap's own
+`what_is_missing`, and the trap still resolves and still notifies. A
+promotion that failed silently would be indistinguishable from one that
+never ran.
+
+### What it does not touch
+
+`AUTO_TRADE_DRY_RUN` stays a deploy-level switch; promotion never flips
+it, and a promoted setup runs the same dry run as a hand-registered one.
+`AUTO_TRADE_MAX_OPEN_POSITIONS`, `AUTO_TRADE_MAX_TRADES_PER_DAY`,
+`AUTO_TRADE_MAX_SLIPPAGE_RISK_FRACTION` and the downstream kill-zone and
+news gates are unchanged: promotion is an **extra upstream filter**, not
+a replacement for anything below it. A promoted setup still has to be
+touched, still has to show rejection → M5 MSS → displacement, and still
+has to clear the whole pre-submission checklist.
+
+### Rolling it out
+
+1. `AUTO_PROMOTE_TRAPS=true` with auto-trade still off. Confirm in the
+   logs and Telegram that the *computed setups* look like setups you
+   would have taken: right model, right array, right stop, sane targets,
+   and the right gate decisions on the ones that were refused.
+2. Then arm auto-trade with `AUTO_TRADE_DRY_RUN=true` and check the
+   order payload separately.
+3. Only once both have been read in the logs, drop the dry run.
 
 ## Auto-trade
 
@@ -306,7 +446,12 @@ index.js            server, scheduler, both engines, execution driver, MCP + RES
 lib/core.mjs        pure logic — scaling, bar discipline, analytics, evidence, entry
                     sequence, skill context, setup lifecycle, anti-SL-Hunter,
                     entry opportunity, event trail, sizing, the pre-submission checklist
+lib/promotion.mjs   the promotion gates and the geometry a confirmed trap becomes
+lib/ict.mjs         the analysis pipeline's own primitives — swings, FVGs, displacement
 lib/execution.mjs   upstream tool discovery, schema-driven order payloads, submission
+lib/ict.mjs         the analysis pipeline's primitives, ported: swings, FVGs,
+                    displacement, structure, sweeps, premium/discount
+lib/promotion.mjs   trap-confirmation gates and the setup geometry they produce
 lib/upstream.mjs    managed cTrader MCP client + coalescing market-data layer
 lib/store.mjs       watch registry + durable atomic snapshot
 lib/notify.mjs      Telegram outbox with retry and delivery accounting
@@ -314,10 +459,12 @@ test/adversarial.test.mjs   the 25 required attack scenarios
 test/execution.test.mjs     the entry sequence, sizing, checklist and payload construction
 test/skill-context.test.mjs the skill-context fast lane and the guardrails around it
 test/lifecycle.test.mjs     the setup lifecycle, anti-SL-Hunter and entry opportunity
+test/promotion.test.mjs     the ported primitives, the promotion gates and the geometry
 docs/skill-context.md       the contract the analysis skill fills in
 docs/setup-lifecycle.md     the setup lifecycle contract, in full
 test/smoke.mjs              boots the real server against a fake upstream, twice
 test/smoke-autotrade.mjs    drives a scripted setup all the way to a placed order
+test/smoke-promotion.mjs    promotes a delivered trap and refuses a drifting one
 skill/                      the ICT Sniper Liquidity Engine analysis skill that fills it
 ```
 
@@ -415,6 +562,26 @@ a complete confirmation sequence, can ask the broker for a position.
 | `SKILL_CONTEXT_FAVORABLE_R` | `0.15` | `FAVORABLE_EARLY` threshold, in entry-to-invalidation multiples |
 | `SKILL_CONTEXT_STRONG_R` | `0.5` | `STRONG_MOVE` threshold |
 | `SKILL_CONTEXT_ADVERSE_R` | `0.5` | `FAILED` threshold |
+
+### Trap promotion
+
+| Variable | Default | Notes |
+|---|---|---|
+| `AUTO_PROMOTE_TRAPS` | `false` | the only thing that arms promotion; a trap's own `auto_promote:true` cannot |
+| `PROMOTE_DISPLACEMENT_MULTIPLE` | `3` | the confirming candle's ratio against its 20-bar trailing average |
+| `PROMOTE_DISPLACEMENT_WINDOW` | `20` | bars in that average |
+| `PROMOTE_MIN_TRAP_SCORE` | `6` | out of 9; an unreadable or missing score fails |
+| `PROMOTE_REQUIRE_KILL_ZONE` | `true` | |
+| `PROMOTE_KILL_ZONE_LOOKAHEAD_MIN` | `10` | a zone opening this soon counts as open |
+| `PROMOTE_REQUIRE_NEWS_CLEAR` | `true` | |
+| `PROMOTE_SL_BUFFER_ATR_FRACTION` | `0.15` | buffer beyond the structural swing |
+| `PROMOTE_MIN_RR` | `1` | refuse the promotion if TP1 is closer than this |
+| `PROMOTE_EXPIRATION_MINUTES` | `120` | expiry on the promoted setup |
+| `PROMOTE_RISK_PERCENT` | account default | per-promotion sizing override |
+| `PROMOTE_LTF_BARS` / `PROMOTE_HTF_BARS` | `120` / `60` | history pulled for the recomputation |
+| `PROMOTE_DEFENCE_PROFILE` | `standard` | what a promoted setup must prove after its touch |
+| `PROMOTE_URGENCY` | `NORMAL` | how patient its confirmation hold is |
+| `PROMOTE_CONFIRMATION_DEADLINE_MINUTES` | `0` (off) | deadline on the promoted setup's confirmation |
 
 ### Auto-trade
 

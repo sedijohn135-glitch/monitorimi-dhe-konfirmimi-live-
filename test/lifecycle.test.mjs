@@ -750,3 +750,58 @@ test("L47 — a tracked trade survives a restart with its reported targets intac
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// The trade's risk is entry-to-stop. The thesis line says when the
+// analysis is wrong; it never says how much the trade costs when it
+// fails — a trade can only lose as far as the price it is stopped at.
+// Conflating the two rejects well-shaped setups for declaring a wide
+// thesis, which is how a promoted trap was refused registration.
+
+test("L48 — a thesis line beyond the stop does not shrink the setup's measured R:R", () => {
+  // entry→stop is 29, entry→tp1 is 35.75 — a 1.23R setup by the only
+  // measure that describes the trade. The thesis line sits 42 away.
+  const shape = {
+    symbol: "XAUUSD",
+    direction: "sell",
+    entry: 4317.75,
+    sl: 4346.78,
+    thesis_invalidation: 4360,
+    tp1: 4282,
+  };
+  const registered = validateWatchInput(shape);
+  assert.equal(registered.sl, 4346.78);
+  assert.equal(registered.invalidation, 4360);
+  assert.equal(registered.thesis_invalidation_declared, true);
+
+  // Measured against the thesis line it would read 0.85R and be refused.
+  const againstThesis = Math.abs(shape.tp1 - shape.entry) / Math.abs(shape.entry - 4360);
+  assert.ok(againstThesis < 1, "the wrong measure would have rejected this setup");
+});
+
+test("L49 — and a thesis line nearer than the stop cannot flatter a bad one", () => {
+  // entry→stop is 20, entry→tp1 is 15: a 0.75R setup however it is
+  // dressed. A thesis line at 10 away would make it read 1.5R.
+  assert.throws(
+    () =>
+      validateWatchInput({
+        symbol: "XAUUSD",
+        direction: "buy",
+        entry: 4330,
+        sl: 4310,
+        thesis_invalidation: 4320,
+        tp1: 4345,
+      }),
+    /at least 1R/,
+  );
+});
+
+test("L50 — progress and acceptance are measured in the same R", () => {
+  const wideThesis = { ...BUY, invalidation: 4290 };
+  // 4340 is half of the 20-point entry-to-stop distance in favour. It is
+  // only a quarter of the distance to the thesis line, so a thesis-based
+  // R would report this as WITHIN_ZONE and withhold the fast lane.
+  const forward = evaluateEntryOpportunity(wideThesis, { mid: 4340, atr: 40, tolerance: 0.1 });
+  assert.equal(forward.remainingRisk, 30);
+  assert.equal(forward.cap, 6, "the deviation cap is a fraction of entry-to-stop, not of the thesis distance");
+});

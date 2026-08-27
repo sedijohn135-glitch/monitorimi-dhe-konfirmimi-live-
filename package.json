@@ -1,13 +1,13 @@
 {
   "name": "watch-monitor-mcp",
-  "version": "7.2.0",
+  "version": "7.3.0",
   "private": true,
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "test": "node --test test/*.test.mjs",
-    "smoke": "node test/smoke.mjs && node test/smoke-autotrade.mjs"
+    "smoke": "node test/smoke.mjs && node test/smoke-autotrade.mjs && node test/smoke-promotion.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
