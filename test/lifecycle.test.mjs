@@ -24,6 +24,7 @@ import {
   evaluateAntiSl,
   evaluateEntryOpportunity,
   evaluateSafety,
+  confirmationDeadlineFor,
   evaluateTimeWindow,
   evaluateTradeProgress,
   stageOf,
@@ -472,18 +473,65 @@ test("L29 — a fresh setup after an invalidation is a different setup", () => {
   assert.notEqual(first.setup_id, second.setup_id);
 });
 
-test("L30 — the confirmation clock is a boundary, and never a delay inside it", () => {
-  const watch = { confirmationDeadlineAt: 10_000, expiresAt: 100_000 };
-  assert.equal(evaluateTimeWindow(watch, { nowMs: 5_000 }).state, "OPEN");
-  assert.equal(evaluateTimeWindow(watch, { nowMs: 10_001 }).state, "DEADLINE_PASSED");
-  assert.equal(evaluateTimeWindow(watch, { nowMs: 100_001 }).state, "EXPIRED");
-  // Inside the window, nothing is pending: the gate does not ask the
-  // setup to wait for a next candle or a next minute.
-  assert.equal(evaluateTimeWindow(watch, { nowMs: 9_999, killZoneActive: true }).state, "OPEN");
-  // Outside the session, it is a boundary rather than a delay.
+test("L30 — the confirmation clock runs from the touch, not from registration", () => {
+  // This is the bug that killed a live setup: price never reached the
+  // zone, so nothing was confirming, and a *confirmation* deadline
+  // measured from registration ended a setup whose thesis was intact and
+  // whose own entry window had two more hours to run.
+  const armed = {
+    armedAtMs: 0,
+    entryMonitoringUntil: 120 * 60_000,
+    confirmation_deadline_minutes: 25,
+    expiresAt: 150 * 60_000,
+    entry: 4599.1,
+    sl: 4587.5,
+    direction: "buy",
+  };
   assert.equal(
-    evaluateTimeWindow(watch, { nowMs: 5_000, killZoneActive: false }).state,
+    evaluateTimeWindow(armed, { nowMs: 26 * 60_000, entryTouched: false }).state,
+    "OPEN",
+    "an untouched setup is not killed by a clock that has not started",
+  );
+  assert.equal(
+    evaluateTimeWindow(armed, { nowMs: 121 * 60_000, entryTouched: false }).state,
+    "ENTRY_WINDOW_CLOSED",
+    "its own entry window is what bounds the wait",
+  );
+
+  // Once touched, the deadline is measured from the touch.
+  const touched = { ...armed, entryTouched: true, entryTouchedAtMs: 60 * 60_000 };
+  assert.equal(evaluateTimeWindow(touched, { nowMs: 80 * 60_000 }).state, "OPEN");
+  assert.equal(evaluateTimeWindow(touched, { nowMs: 86 * 60_000 }).state, "DEADLINE_PASSED");
+  assert.equal(confirmationDeadlineFor(touched), 85 * 60_000);
+  assert.equal(confirmationDeadlineFor(armed), null, "no touch, no clock");
+
+  // Expiry still outranks everything.
+  assert.equal(evaluateTimeWindow(touched, { nowMs: 151 * 60_000 }).state, "EXPIRED");
+  // Inside the window nothing is pending, and outside the session it is a
+  // boundary rather than a delay.
+  assert.equal(
+    evaluateTimeWindow(touched, { nowMs: 80 * 60_000, killZoneActive: true }).state,
+    "OPEN",
+  );
+  assert.equal(
+    evaluateTimeWindow(touched, { nowMs: 80 * 60_000, killZoneActive: false }).state,
     "OUTSIDE_WINDOW",
+  );
+});
+
+test("L30b — a declared entry window is actually enforced", () => {
+  // It was stored at registration and read by nothing, so an analyst
+  // declaring one got no behaviour from it at all.
+  const watch = { armedAtMs: 0, entryMonitoringUntil: 60_000, expiresAt: 9e15 };
+  assert.equal(evaluateTimeWindow(watch, { nowMs: 30_000, entryTouched: false }).state, "OPEN");
+  assert.equal(
+    evaluateTimeWindow(watch, { nowMs: 61_000, entryTouched: false }).state,
+    "ENTRY_WINDOW_CLOSED",
+  );
+  // And a setup that declared no window is bounded only by its expiry.
+  assert.equal(
+    evaluateTimeWindow({ armedAtMs: 0, expiresAt: 9e15 }, { nowMs: 9e14, entryTouched: false }).state,
+    "OPEN",
   );
 });
 
