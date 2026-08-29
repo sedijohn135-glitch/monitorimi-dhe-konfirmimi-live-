@@ -429,6 +429,39 @@ test("L24b — the deployed monitor does not enforce the cap by default", () => 
   assert.equal(noRewardLeft.reason, "RR_COLLAPSED");
 });
 
+test("L24c — a setup's own max_entry_deviation cannot arm the cap the operator disabled", () => {
+  // The real BTCUSD case, with its own numbers. The analysis template
+  // carries `max_entry_deviation`, so the skill sends one on every setup
+  // — and while a sent value could arm the check for its own setup, that
+  // silently switched distance capping back on for every setup the
+  // operator had deliberately switched it off for.
+  //
+  // Registered: entry 78127, stop 77985, tp1 78420, max_entry_deviation 70.
+  // Confirmed at 78218.10 on acceptance + a graduated pattern + PDA
+  // confluence, with 0.87R still on the table — and refused for running
+  // 91.1 past the entry against a cap of 70.
+  const btc = { direction: "buy", entry: 78127, sl: 77985, invalidation: 77985, tp1: 78420 };
+  const options = {
+    mid: 78218.1,
+    atr: 60,
+    tolerance: 0.5,
+    maxEntryDeviation: 70,
+    minRemainingRR: 0.5,
+  };
+
+  // What the deployed monitor now passes: the operator's switch, alone.
+  const withCapDisarmed = evaluateEntryOpportunity(btc, { ...options, enforceCap: false });
+  assert.equal(withCapDisarmed.actionable, true, "the declared deviation no longer refuses the entry");
+  assert.ok(Math.abs(withCapDisarmed.chase - 91.1) < 1e-9, "the drift is still measured");
+  assert.equal(withCapDisarmed.cap, 70, "and the declared cap is still reported");
+  assert.ok(withCapDisarmed.remainingRR > 0.5, "there was a real trade left to take");
+
+  // The mechanism itself is intact for an operator who arms it.
+  const withCapArmed = evaluateEntryOpportunity(btc, { ...options, enforceCap: true });
+  assert.equal(withCapArmed.actionable, false);
+  assert.equal(withCapArmed.reason, "ENTRY_ESCAPED");
+});
+
 test("L25 — a better fill than planned is never a missed entry", () => {
   // A buy filling below its entry is a better trade, not a late one.
   const better = evaluateEntryOpportunity(BUY, { mid: 4320, atr: 4, tolerance: 0.1 });
