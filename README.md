@@ -183,13 +183,25 @@ completed, `REANALYSIS_REQUIRED` if it completed and a gate held it.
 
 ### When the entry runs away
 
-Price reaching TP1 without you, or a confirmation that arrives with price
-too far from the planned entry, both resolve `ENTRY_MISSED`. Not an
-expiry, not a failure — the thesis may have been perfectly right — and
-never a reason to chase. The distance that counts as too far is derived
-from the instrument's volatility and the setup's own risk, not from a
-fixed number of points, and only drift that makes the fill *worse*
-counts.
+Price reaching TP1 without you always resolves `ENTRY_MISSED` — not an
+expiry, not a failure, and never a reason to chase.
+
+A confirmation that completes with price far from the planned entry does
+**not**, by default. The evidence engine's own hold-and-fade check (§7)
+already discards a move that reverses: a signal fades and resets the
+moment price trades back against it, before it can graduate. A signal
+that *does* graduate has proven itself by not reversing — and by the time
+that persistence check completes on a genuine momentum move, price is
+often well past the zone that first drew attention to it. That distance
+is the proof, not a defect; capping it stands an entry down for the exact
+reason it was safe.
+
+`ENTRY_DEVIATION_CHECK_ENABLED=true` restores a cap for every setup, or a
+single setup can opt into one on its own via `max_entry_deviation` without
+changing the default for anything else. The distance that counts as too
+far, when the check does apply, is derived from the instrument's
+volatility and the setup's own risk, never a fixed number of points, and
+only drift that makes the fill *worse* counts.
 
 ### What the setup can declare about itself
 
@@ -465,8 +477,9 @@ a complete confirmation sequence, can ask the broker for a position.
 | `ANTI_SL_RECLAIM_HOLD_MS` | `60000` | a reclaim has to hold for a closed bar |
 | `ANTI_SL_FAST_ATR_PER_MIN` | `1` | the speed at which a deeper excursion is still credible as a sweep |
 | `ANTI_SL_MAX_EVALUATION_MS` | `1800000` | past this an unclassified excursion goes back to the analyst |
-| `ENTRY_DEVIATION_ATR_FRACTION` | `0.75` | volatility term of the entry-deviation cap |
-| `ENTRY_DEVIATION_RISK_FRACTION` | `0.3` | ceiling as a fraction of entry-to-stop |
+| `ENTRY_DEVIATION_CHECK_ENABLED` | `false` | off by default — a graduated signal has already proven it did not fade, distance from the zone notwithstanding, so capping distance stands down entries for the reason they were safe. `true` requires every setup to stay within the cap regardless of what it declares |
+| `ENTRY_DEVIATION_ATR_FRACTION` | `0.75` | volatility term of the cap, when it applies |
+| `ENTRY_DEVIATION_RISK_FRACTION` | `0.3` | ceiling as a fraction of entry-to-stop, when it applies |
 | `ENTRY_MIN_REMAINING_RR` | `0.5` | floor on what remains of the R:R **at the fill**. Deliberately below the 1R registration demands — the acceptance requirement moves the fill up to 0.35R past entry by design, so a 1R floor here would contradict it |
 | `CONFIRMATION_DEADLINE_MINUTES` | `0` (off) | service-wide default for the per-setup deadline |
 | `TRADE_TRACKING_ENABLED` | `true` | the post-entry TP/SL lifecycle |

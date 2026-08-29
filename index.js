@@ -244,6 +244,16 @@ const CONFIG = {
   // far is far, in the setup's own terms rather than in points.
   entryDeviationAtrFraction: num(process.env.ENTRY_DEVIATION_ATR_FRACTION, 0.75, 0.05),
   entryDeviationRiskFraction: num(process.env.ENTRY_DEVIATION_RISK_FRACTION, 0.3, 0.05),
+  // OFF by default. A momentum entry that only confirms once it is well
+  // beyond the zone is not a stale read of a chase — it is the evidence
+  // engine's own hold-and-fade check doing its job: a fake move fades
+  // and resets before it graduates, so a graduated signal has already
+  // proven it did not reverse, distance from the zone notwithstanding.
+  // Capping that distance stands the trade down for the reason it was
+  // safe. Set true to require every setup to stay within the cap, or
+  // leave this off and use a setup's own max_entry_deviation for the
+  // rare setup that specifically wants zone discipline.
+  entryDeviationCheckEnabled: process.env.ENTRY_DEVIATION_CHECK_ENABLED === "true",
   // The floor on what is left of the setup's reward-to-risk *at the fill*,
   // not at the planned entry. It is deliberately below the 1R that
   // registration demands, because this engine does not enter at the
@@ -1301,6 +1311,7 @@ async function tickSetupWatch(watch) {
       atrFraction: CONFIG.entryDeviationAtrFraction,
       riskFraction: CONFIG.entryDeviationRiskFraction,
       minRemainingRR: CONFIG.entryMinRemainingRR,
+      enforceCap: CONFIG.entryDeviationCheckEnabled || finiteNumber(watch.max_entry_deviation) !== null,
     });
     watch.lastReason = "entry_window_closed";
     if (!opportunity.actionable) {
@@ -1734,6 +1745,7 @@ async function tickSetupWatch(watch) {
     atrFraction: CONFIG.entryDeviationAtrFraction,
     riskFraction: CONFIG.entryDeviationRiskFraction,
     minRemainingRR: CONFIG.entryMinRemainingRR,
+    enforceCap: CONFIG.entryDeviationCheckEnabled || finiteNumber(watch.max_entry_deviation) !== null,
   });
   if (!opportunity.actionable) {
     watch.lastReason = "entry_opportunity_closed";
@@ -2796,7 +2808,7 @@ const CUSTOM_TOOLS = [
         max_entry_deviation: {
           type: "number",
           description:
-            "How far past the planned entry price may run and still be worth entering, in price units. Replaces the volatility-and-risk derivation, but is never honoured beyond half the entry-to-stop distance. Beyond the cap the setup resolves ENTRY_MISSED rather than chasing.",
+            "How far past the planned entry price may run and still be worth entering, in price units. By default the monitor does NOT cap entry distance at all — a momentum move that only confirms once it is well beyond the zone has already proven itself by not fading, and standing it down for that distance would refuse the exact entries this evidence engine is built to take. Send this field only for a setup that specifically wants zone discipline; it then arms the check for THIS setup and is never honoured beyond half the entry-to-stop distance. Beyond the cap the setup resolves ENTRY_MISSED rather than chasing. Service-wide default can be changed with ENTRY_DEVIATION_CHECK_ENABLED.",
         },
         confirmation_deadline_minutes: {
           type: "number",
