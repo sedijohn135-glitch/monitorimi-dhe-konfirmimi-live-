@@ -222,12 +222,20 @@ often well past the zone that first drew attention to it. That distance
 is the proof, not a defect; capping it stands an entry down for the exact
 reason it was safe.
 
-`ENTRY_DEVIATION_CHECK_ENABLED=true` restores a cap for every setup, or a
-single setup can opt into one on its own via `max_entry_deviation` without
-changing the default for anything else. The distance that counts as too
-far, when the check does apply, is derived from the instrument's
-volatility and the setup's own risk, never a fixed number of points, and
-only drift that makes the fill *worse* counts.
+`ENTRY_DEVIATION_CHECK_ENABLED=true` restores the cap, and it is the
+**only** thing that can. A setup's own `max_entry_deviation` refines the
+cap where capping is already armed; it cannot arm it. It used to, and
+that quietly undid the default for every setup: the field sits in the
+analysis template, so the skill sends one every time, and a real BTCUSD
+entry was refused for running 91 past its entry against a declared cap of
+70 — confirmed on acceptance, a graduated pattern and PDA confluence,
+with 0.87R still on the table. A registering client can withhold
+permission, never add it, exactly as `auto_promote` already works.
+
+The distance that counts as too far, where the check does apply, is
+derived from the instrument's volatility and the setup's own risk, never
+a fixed number of points, and only drift that makes the fill *worse*
+counts.
 
 ### What the setup can declare about itself
 
@@ -239,7 +247,7 @@ only drift that makes the fill *worse* counts.
 | `potential_trade_sl` (= `sl`) + `thesis_invalidation` (= `invalidation`) | where a trade **would be stopped**, and where the **analysis is wrong**. Send both whenever they differ: a setup that declares only one number has declared a stop, and before entry a stop alone invalidates nothing — it opens the anti-SL branch instead |
 | `defence_profile` | what **this** setup must prove after the touch: `standard`, `m1_continuation` or `rejection_displacement`. The monitor never picks one for you |
 | `urgency` | `LOW`/`NORMAL`/`HIGH`/`CRITICAL`. Scales how long evidence must hold and nothing else — it cannot remove a proof, open a gate, or outrank an invalidation |
-| `max_entry_deviation` | how far past the planned entry is still worth entering. Never honoured beyond half the entry-to-stop distance |
+| `max_entry_deviation` | how far past the planned entry is still worth entering. **Ignored unless the operator armed capping** with `ENTRY_DEVIATION_CHECK_ENABLED`; sending it cannot arm it. Where it does apply, never honoured beyond half the entry-to-stop distance |
 | `confirmation_deadline_minutes` | how long confirmation may take **once the zone is touched** — the clock runs from the touch, not from registration |
 | `entry_monitoring_window_minutes` | how long to wait for price to reach the zone at all |
 | `prerequisite_level` + `prerequisite_timeframe` + `prerequisite_rule` | what must print before entry is live at all, e.g. an M15 **body close** below `4324.71`. A wick through it is not a close, and until it prints the watch reports `WAITING_FOR_SETUP_CONFIRMATION` |
@@ -531,7 +539,7 @@ a complete confirmation sequence, can ask the broker for a position.
 | `ANTI_SL_RECLAIM_HOLD_MS` | `60000` | a reclaim has to hold for a closed bar |
 | `ANTI_SL_FAST_ATR_PER_MIN` | `1` | the speed at which a deeper excursion is still credible as a sweep |
 | `ANTI_SL_MAX_EVALUATION_MS` | `1800000` | past this an unclassified excursion goes back to the analyst |
-| `ENTRY_DEVIATION_CHECK_ENABLED` | `false` | off by default — a graduated signal has already proven it did not fade, distance from the zone notwithstanding, so capping distance stands down entries for the reason they were safe. `true` requires every setup to stay within the cap regardless of what it declares |
+| `ENTRY_DEVIATION_CHECK_ENABLED` | `false` | off by default — a graduated signal has already proven it did not fade, distance from the zone notwithstanding, so capping distance stands down entries for the reason they were safe. The **only** thing that arms the cap: a setup's own `max_entry_deviation` refines it but cannot arm it. `true` requires every setup to stay within the cap |
 | `ENTRY_DEVIATION_ATR_FRACTION` | `0.75` | volatility term of the cap, when it applies |
 | `ENTRY_DEVIATION_RISK_FRACTION` | `0.3` | ceiling as a fraction of entry-to-stop, when it applies |
 | `ENTRY_MIN_REMAINING_RR` | `0.5` | floor on what remains of the R:R **at the fill**. Deliberately below the 1R registration demands — the acceptance requirement moves the fill up to 0.35R past entry by design, so a 1R floor here would contradict it |

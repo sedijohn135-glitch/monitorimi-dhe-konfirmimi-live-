@@ -254,9 +254,15 @@ const CONFIG = {
   // and resets before it graduates, so a graduated signal has already
   // proven it did not reverse, distance from the zone notwithstanding.
   // Capping that distance stands the trade down for the reason it was
-  // safe. Set true to require every setup to stay within the cap, or
-  // leave this off and use a setup's own max_entry_deviation for the
-  // rare setup that specifically wants zone discipline.
+  // safe.
+  //
+  // This is the ONLY thing that arms the cap. A setup's own
+  // `max_entry_deviation` refines the cap once it is armed; it can no
+  // longer arm it. A registering client used to be able to switch on,
+  // for its own setup, the check the operator had deliberately switched
+  // off — and did, on every setup, because the field sits in the
+  // analysis template. That is the same asymmetry `auto_promote` already
+  // has: a client can withhold permission, never add it.
   entryDeviationCheckEnabled: process.env.ENTRY_DEVIATION_CHECK_ENABLED === "true",
   // §18/§19 additional graduated technical signals, alongside CISD/SMT/
   // pattern rather than gating anything: how many independent PDA arrays
@@ -1325,7 +1331,7 @@ async function tickSetupWatch(watch) {
       atrFraction: CONFIG.entryDeviationAtrFraction,
       riskFraction: CONFIG.entryDeviationRiskFraction,
       minRemainingRR: CONFIG.entryMinRemainingRR,
-      enforceCap: CONFIG.entryDeviationCheckEnabled || finiteNumber(watch.max_entry_deviation) !== null,
+      enforceCap: CONFIG.entryDeviationCheckEnabled,
     });
     watch.lastReason = "entry_window_closed";
     if (!opportunity.actionable) {
@@ -1764,7 +1770,7 @@ async function tickSetupWatch(watch) {
     atrFraction: CONFIG.entryDeviationAtrFraction,
     riskFraction: CONFIG.entryDeviationRiskFraction,
     minRemainingRR: CONFIG.entryMinRemainingRR,
-    enforceCap: CONFIG.entryDeviationCheckEnabled || finiteNumber(watch.max_entry_deviation) !== null,
+    enforceCap: CONFIG.entryDeviationCheckEnabled,
   });
   if (!opportunity.actionable) {
     watch.lastReason = "entry_opportunity_closed";
@@ -2888,7 +2894,7 @@ const CUSTOM_TOOLS = [
         max_entry_deviation: {
           type: "number",
           description:
-            "How far past the planned entry price may run and still be worth entering, in price units. By default the monitor does NOT cap entry distance at all — a momentum move that only confirms once it is well beyond the zone has already proven itself by not fading, and standing it down for that distance would refuse the exact entries this evidence engine is built to take. Send this field only for a setup that specifically wants zone discipline; it then arms the check for THIS setup and is never honoured beyond half the entry-to-stop distance. Beyond the cap the setup resolves ENTRY_MISSED rather than chasing. Service-wide default can be changed with ENTRY_DEVIATION_CHECK_ENABLED.",
+            "How far past the planned entry price may run and still be worth entering, in price units. IGNORED unless the operator has armed distance capping with ENTRY_DEVIATION_CHECK_ENABLED, which is OFF by default and cannot be switched on by sending this field: a momentum move that only confirms once it is well beyond the zone has already proven itself by not fading, and standing it down for that distance refuses the exact entries this evidence engine is built to take. Sending it is therefore safe but usually pointless — it is recorded on the setup either way, and only refines the cap where capping is already armed, never beyond half the entry-to-stop distance. Where it is armed, running past the cap resolves ENTRY_MISSED rather than chasing.",
         },
         confirmation_deadline_minutes: {
           type: "number",
