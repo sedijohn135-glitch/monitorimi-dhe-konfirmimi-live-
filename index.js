@@ -62,6 +62,7 @@ import {
   advanceEntrySequence,
   advanceGeneration,
   advanceSlExcursion,
+  advanceStructureFailure,
   appendTrail,
   barClosedAfter,
   barKey,
@@ -94,6 +95,7 @@ import {
   forwardValidationState,
   fvgCheck,
   killZoneStatus,
+  macroStatus,
   newsBlackout,
   numericTimestampMs,
   oppositeBias,
@@ -117,6 +119,7 @@ import {
   watchKey,
   zoneTouchLevel,
 } from "./lib/core.mjs";
+import { checkMidnightJudas, pdaConfluence } from "./lib/ict.mjs";
 import { CTraderMcpClient, MarketData, asArray } from "./lib/upstream.mjs";
 import { Executor } from "./lib/execution.mjs";
 import {
@@ -254,6 +257,16 @@ const CONFIG = {
   // leave this off and use a setup's own max_entry_deviation for the
   // rare setup that specifically wants zone discipline.
   entryDeviationCheckEnabled: process.env.ENTRY_DEVIATION_CHECK_ENABLED === "true",
+  // §18/§19 additional graduated technical signals, alongside CISD/SMT/
+  // pattern rather than gating anything: how many independent PDA arrays
+  // (FVG, order block, equal highs/lows) have to cluster at the entry
+  // level before it counts as confluence.
+  entryConfluenceMinHits: num(process.env.ENTRY_CONFLUENCE_MIN_HITS, 2, 1),
+  entryConfluenceTolerancePercent: num(process.env.ENTRY_CONFLUENCE_TOLERANCE_PCT, 0.1, 0.01),
+  // §20 post-entry structural failure. Purely advisory: it tells the
+  // human holding the trade that structure has turned against them, well
+  // before the stop would, but it never closes the trade itself.
+  activeTradeStructureFailureLimit: num(process.env.ACTIVE_TRADE_STRUCTURE_FAILURE_LIMIT, 3, 1),
   // The floor on what is left of the setup's reward-to-risk *at the fill*,
   // not at the planned entry. It is deliberately below the 1R that
   // registration demands, because this engine does not enter at the
@@ -1441,6 +1454,11 @@ async function tickSetupWatch(watch) {
       atrFraction: CONFIG.acceptanceAtrFraction,
       riskFraction: CONFIG.acceptanceRiskFraction,
     }),
+    midnightJudas: checkMidnightJudas(m5.bars, watch.direction).present,
+    confluence:
+      pdaConfluence(m5.bars, watch.entry, watch.direction, {
+        tolerancePercent: CONFIG.entryConfluenceTolerancePercent,
+      }).count >= CONFIG.entryConfluenceMinHits,
   };
 
   if (spreadHealth.abnormal) {
@@ -1776,7 +1794,12 @@ async function tickSetupWatch(watch) {
       holdMs: baseHoldMs,
       profile: defence.profile,
     };
-    record(watch, "enter_now", { price: mid, profile: defence.profile, latency: watch.latency }, now);
+    record(
+      watch,
+      "enter_now",
+      { price: mid, profile: defence.profile, latency: watch.latency, macroWindow: macroStatus(now).window },
+      now,
+    );
     store.dirty = true;
 
     const auto = autoTradeStatus();
@@ -1925,6 +1948,43 @@ async function tickTradeWatch(trade) {
         `price returns.</i>`,
     );
     return;
+  }
+
+  // §20 Post-entry structural failure — advisory only. The stop above is
+  // a price line; this is the market printing fresh structure against
+  // the position, well before price would ever reach that line. It never
+  // closes the trade itself — there is no broker order behind a manual
+  // position, only the human holding it — so it fires one notification
+  // the first time the count reaches the limit and then stays quiet.
+  const structureRaw = await market.bars(trade.symbol, symbolId, "M5", 60);
+  const structureSeries = closedSeries(structureRaw || [], "M5", { nowMs: now });
+  if (structureSeries.status === "OK" && structureSeries.bars.length >= 10) {
+    const wasFailing = trade.structureFailure?.defensiveExit === true;
+    trade.structureFailure = advanceStructureFailure(
+      trade.structureFailure,
+      structureSeries.bars,
+      trade.direction,
+      { limit: CONFIG.activeTradeStructureFailureLimit },
+    );
+    if (trade.structureFailure.defensiveExit && !wasFailing) {
+      store.dirty = true;
+      record(
+        trade,
+        "structure_failing",
+        { count: trade.structureFailure.count, level: trade.structureFailure.lastBreakLevel },
+        now,
+      );
+      notify(
+        `<b>STRUCTURE FAILING — CONSIDER EXITING</b>\n` +
+          `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(trade.direction.toUpperCase())}\n` +
+          `<b>Setup ID:</b> ${htmlEscape(trade.setup_id || trade.parentWatchId)}\n` +
+          `<b>${htmlEscape(String(trade.structureFailure.count))} closes have now broken structure against this position</b>, ` +
+          `well ahead of the stop at ${htmlEscape(formatLevel(trade.sl))}.\n` +
+          `<i>This is advisory — the trade is still tracked and the stop still applies. ` +
+          `Nothing is closed automatically.</i>`,
+        { dedupeKey: `${trade.id}:structure_failing` },
+      );
+    }
   }
 
   const progress = evaluateTradeProgress(trade, { mid, protective, nowMs: now });
