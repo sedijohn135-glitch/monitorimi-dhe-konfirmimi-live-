@@ -233,8 +233,22 @@ the operator can predict what it will do.
 - **live acceptance** — price has travelled far enough beyond the entry,
   and still sits far enough from the risk line, to call the level
   accepted rather than merely touched; and
-- **at least one graduated technical signal** — CISD, SMT divergence, or
-  a price pattern (rejection wick / engulfing).
+- **at least one graduated technical signal** — CISD, SMT divergence, a
+  price pattern (rejection wick / engulfing), a **Judas Swing at the New
+  York midnight open** (the swing nearest the open swept, then price
+  closes back through the open itself, against the swept side), or **PDA
+  confluence** (an FVG, an order block, and/or an equal-highs/lows
+  cluster all sitting within a tight tolerance of the entry level).
+
+The last two were added from a direct read of ICT's own lecture material
+rather than invented — the midnight open is the single most repeated
+reference level across it, and array confluence is how it grades one
+level as stronger evidence than another. Both are graduated technical
+signals like the rest: they have to survive the same hold-and-fade rule,
+and neither is required — they only add ways to graduate, never a way to
+refuse. `ENTRY_CONFLUENCE_MIN_HITS` (default `2`) and
+`ENTRY_CONFLUENCE_TOLERANCE_PCT` (default `0.1`) tune the confluence
+read.
 
 Each has to survive both wall-clock time and a market-time boundary
 before it counts. Poll frequency is never a substitute for market time.
@@ -372,6 +386,20 @@ After that:
 - **process died between sending and recording** → the same, on the next
   boot. The watch is never re-armed, so it can never resubmit.
 
+## After the entry: structural failure
+
+TP1/2/3 and the stop are price lines. Structure can erode before price
+ever reaches either — a fresh swing prints against the position and then
+a bar closes through it, again and again, while the stop sits untouched.
+Once `ACTIVE_TRADE_STRUCTURE_FAILURE_LIMIT` such closes have happened
+(default `3`), one Telegram message fires: **STRUCTURE FAILING — CONSIDER
+EXITING**.
+
+This is advisory only, and fires once. It never closes the trade, adjusts
+the stop, or changes anything the monitor tracks — TP1/2/3 and the stop
+still apply exactly as before. There is no broker order behind a manual
+position for it to act on; only the human holding the trade can.
+
 ## Layout
 
 ```
@@ -484,6 +512,9 @@ a complete confirmation sequence, can ask the broker for a position.
 | `CONFIRMATION_DEADLINE_MINUTES` | `0` (off) | service-wide default for the per-setup deadline |
 | `TRADE_TRACKING_ENABLED` | `true` | the post-entry TP/SL lifecycle |
 | `TRADE_WATCH_INTERVAL_MS` / `MAX_TRADE_WATCHES` | `10000` / `10` | its cadence and capacity |
+| `ENTRY_CONFLUENCE_MIN_HITS` | `2` | distinct PDA array types that must cluster at the entry level for confluence to graduate |
+| `ENTRY_CONFLUENCE_TOLERANCE_PCT` | `0.1` | how close, as a percent of price, counts as "the same level" |
+| `ACTIVE_TRADE_STRUCTURE_FAILURE_LIMIT` | `3` | closes against an open position before the one advisory "consider exiting" alert fires |
 
 ### Skill context
 

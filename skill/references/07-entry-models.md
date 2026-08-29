@@ -1,4 +1,4 @@
-# 07 · ENTRY MODELS — 18 Modelet e Hyrjes
+# 07 · ENTRY MODELS — 19 Modelet e Hyrjes
 
 Çdo model është valid VETËM kur kushtet e tij specifike plotësohen.
 
@@ -350,7 +350,37 @@ Karakteristikë: Precision entry bazuar në Fibo overlap me PDA.
 
 ---
 
-## 19 · MODEL SELECTION LOGIC
+## 19 · VENOM (Deferred Turtle Soup)
+
+**Setup:**
+```
+Origjina: ICT — variant "deferred entry" i Turtle Soup (#5).
+Turtle Soup klasik hyn MENJËHERË pas reversal, te vetë sweep-i.
+Venom hyn MË VONË, pasi struktura ka dhënë firmën — jo te sweep-i vetë.
+
+Struktura (dy "fangs"):
+  1. Sweep nën/mbi një liquidity pool (SSL për long, BSL për short)
+     — minimumi 1 candle mbyllet përtej pool-it, jo thjesht wick
+  2. CIBI (sell-side imbalance) e ndjekur nga BISI (buy-side imbalance)
+     që e lë atë pas — duhet SEKUENCA e të dyjave, njëra vetëm s'mjafton
+
+Entry: në ose përtej closing price të candle-it të 2-të (candle-i i reclaim/BISI)
+SL: përtej low/high e candle-it që bëri sweep-in (jo e candle-it të reclaim)
+TP: opposing liquidity pool / FVG kundërshtare
+
+Karakteristikë: DEFERRED. Nuk kërkon të kapësh vetë momentin e sweep-it
+(rrezik i lartë, kohë vendimi shumë e shkurtër). Prit sekuencën CIBI→BISI,
+pastaj hyr — edhe nëse çmimi ka konsoliduar/lëvizur gjatë ("time distortion"),
+edhe nëse dukesh sikur po "ndjek" çmimin. Brenda konsolidimit mund të ketë
+disa mundësi hyrjeje të njëpasnjëshme, të gjitha valide përderisa janë
+në ose përtej closing price të candle-it të 2-të.
+```
+
+**Kur përdoret:** Kur Turtle Soup klasik do të kërkonte hyrje te vetë sweep-i (shumë të rrezikshme/të vështira për t'u kapur në kohë). Zgjidhet siguria mbi precizitetin — parim i njëjtë me atë që "s'na intereson sniper, na intereson safe."
+
+---
+
+## 20 · MODEL SELECTION LOGIC
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -372,6 +402,9 @@ Karakteristikë: Precision entry bazuar në Fibo overlap me PDA.
 │    → LSS                                             │
 │  ELIF Çmimi në Fibo zone + PDA overlap:             │
 │    → FBE                                             │
+│  ELIF Sweep + CIBI→BISI reclaim (sweep-i vetë       │
+│  tashmë ka kaluar, s'kapet dot me hyrje të menjëhershme): │
+│    → Venom (deferred)                                │
 │  ELSE:                                               │
 │    → Prit ose refuzo                                 │
 └─────────────────────────────────────────────────────┘

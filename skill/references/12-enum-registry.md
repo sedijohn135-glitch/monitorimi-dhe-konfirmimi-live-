@@ -117,7 +117,7 @@ TP_BASIS:              Equilibrium 50% / DOL final / R1 / R2 / R3 / SD projectio
 ## 8 · ENTRY MODELS
 
 ```
-MODEL:                 ICT 2022 / Market Anchor / Model 2 Amplified / Silver Bullet / Turtle Soup / OB + FVG Confluence / Unicorn / RIFVG / MMXM / MMBM / BISI / SIBI / Vault Pocket / SDR / DRO / LSS / OSST / STRC / SRT / FBE
+MODEL:                 ICT 2022 / Market Anchor / Model 2 Amplified / Silver Bullet / Turtle Soup / OB + FVG Confluence / Unicorn / RIFVG / MMXM / MMBM / BISI / SIBI / Vault Pocket / SDR / DRO / LSS / OSST / STRC / SRT / FBE / Venom
 ```
 
 ---
