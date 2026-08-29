@@ -110,6 +110,7 @@ import {
   trailEvent,
   symbolCurrencies,
   trapWatchKey,
+  triggerTaken,
   updateSpreadHealth,
   urgencyHoldMs,
   validateTrapWatchInput,
@@ -2626,8 +2627,27 @@ async function tickTrapWatch(watch) {
     return;
   }
 
-  if (!bodyClosedBeyond(current, watch.trigger_level, watch.bias)) {
-    watch.lastReason = "awaiting_trigger";
+  // Taking the trigger is a crossing, not a state: a close beyond a level
+  // price was already beyond breaks nothing. Without this a trap armed on
+  // the wrong side of its own trigger reports the level as taken on its
+  // first post-arm candle, naming a break that never happened.
+  const take = triggerTaken(closed, watch.trigger_level, watch.bias);
+  if (take.comparison) {
+    log(
+      `trap ${watch.id} trigger test: ${watch.symbol} ${watch.bias} ${watch.timeframe} ` +
+        `close ${formatLevel(take.comparison.close)} ${take.comparison.operator} ` +
+        `trigger ${formatLevel(take.comparison.level)} → beyond=${take.comparison.beyond}` +
+        (take.comparison.previousClose === null
+          ? ""
+          : `, previous close ${formatLevel(take.comparison.previousClose)}`) +
+        `; taken=${take.taken} (${take.reason})`,
+    );
+  }
+  if (!take.taken) {
+    // Deliberately not resolved. If price returns to the un-taken side and
+    // then genuinely closes back through, the crossing test above sees it
+    // and the watch works from then on.
+    watch.lastReason = take.comparison?.beyond ? "trigger_already_passed" : "awaiting_trigger";
     return;
   }
 
@@ -3167,6 +3187,38 @@ function createSetupWatch(args) {
   return { watch, duplicate: false };
 }
 
+/**
+ * Whether live price has already gone past a trap's trigger, in the
+ * bias direction, before the watch is even armed.
+ *
+ * A trap watch exists to wait for a level to be taken. Arming one whose
+ * trigger price is already through is not a watch: the condition is true
+ * before monitoring starts, and the read that produced the level has
+ * been overtaken by the market. That is a stale analysis to send back to
+ * the analyst, not a level to monitor.
+ *
+ * Unreadable price is never a refusal — registration must not depend on
+ * the feed being up, and the crossing test in `tickTrapWatch` still
+ * defends the notification itself.
+ */
+async function trapTriggerAlreadyPassed(input) {
+  try {
+    const ids = await market.resolveSymbols([input.symbol]);
+    const symbolId = ids.get(input.symbol);
+    if (symbolId === undefined) return { checked: false };
+    const spot = await market.spot(input.symbol, symbolId);
+    if (!spot) return { checked: false };
+    const price = (spot.bid + spot.ask) / 2;
+    if (!market.checkScale(price, input.trigger_level).ok) return { checked: false };
+    const passed =
+      input.bias === "buy" ? price >= input.trigger_level : price <= input.trigger_level;
+    return { checked: true, passed, price };
+  } catch (error) {
+    log(`trap trigger pre-check skipped for ${input.symbol}: ${error.message}`);
+    return { checked: false };
+  }
+}
+
 function createTrapWatch(args) {
   const input = validateTrapWatchInput(args, { trapExpiryMinutes: CONFIG.trapExpiryMinutes });
   const dedupeKey = trapWatchKey(input);
@@ -3438,6 +3490,29 @@ async function handleCustomTool(name, args = {}) {
   }
 
   if (name === "register_trap_watch") {
+    // Refused before anything is stored: a trigger price has already
+    // gone past is a read the market overtook, and monitoring it would
+    // report a break on the first candle for a level nothing crossed.
+    const preCheck = await trapTriggerAlreadyPassed(
+      validateTrapWatchInput(args, { trapExpiryMinutes: CONFIG.trapExpiryMinutes }),
+    );
+    if (preCheck.checked && preCheck.passed) {
+      const bias = String(args.bias || args.direction || "").toLowerCase();
+      const side = bias === "buy" ? "above" : "below";
+      return textResult({
+        status: "REFUSED",
+        reason: "TRIGGER_ALREADY_PASSED",
+        symbol: String(args.symbol || "").toUpperCase(),
+        bias,
+        trigger_level: Number(args.trigger_level),
+        live_price: Number(preCheck.price.toFixed(5)),
+        message:
+          `Live price ${formatLevel(preCheck.price)} is already ${side} the trigger ` +
+          `${formatLevel(Number(args.trigger_level))} for a ${bias.toUpperCase()} read, so the level ` +
+          `cannot be taken from here — the analysis has been overtaken by the market. ` +
+          `Re-derive the trap from live data and register the level price has yet to reach.`,
+      });
+    }
     const { watch, duplicate } = createTrapWatch(args);
     if (!duplicate) {
       notify(

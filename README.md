@@ -109,6 +109,32 @@ later does not mean the old setup was right.
 Turn the branch off with `ANTI_SL_ENABLED=false` and price reaching the
 stop before entry kills the setup outright, as it used to.
 
+### When a trap's trigger counts as taken
+
+A trap watch waits for a level to be **crossed**, and the direction is
+fixed by the bias: a `buy` read is taken by a body closing **above** its
+trigger, a `sell` read by one closing **below** it. That is the
+convention the arming message prints, and the one registration enforces
+by requiring a buy's flip level to sit below its trigger — invert it and
+a single close could be both the confirmation and the flip.
+
+Taking a level is a **transition, not a state**. A close beyond a level
+price was already beyond breaks nothing; it is just where the market
+already was. So the take requires the previous closed body to have been
+on the un-taken side, and two things follow:
+
+- a trap whose trigger price has already gone past is **refused at
+  registration** (`TRIGGER_ALREADY_PASSED`), naming the live price — the
+  read has been overtaken by the market and belongs back with the
+  analyst;
+- one already armed that way simply never reports a take. It is not
+  killed: if price returns to the un-taken side and genuinely closes back
+  through, the crossing is seen and the watch works from then on.
+
+Every trigger test is logged with the exact comparison it made — close,
+operator, trigger, previous close, and the verdict — so a disputed
+notification can be read straight from the log rather than reconstructed.
+
 ### From a trap straight into a setup
 
 A trap watch used to prove one thing and stop: the level was taken with
