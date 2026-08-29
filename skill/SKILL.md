@@ -1020,7 +1020,7 @@ instruments:
 | 04 | [trap-engine.md](references/04-trap-engine.md) | $10B Pyetja, 8 TIP Questions, Trap Sub-Types |
 | 05 | [pda-arrays.md](references/05-pda-arrays.md) | OB/FVG/BB/RB/BPR/IFVG/BISI/SIBI/RIFVG, Breaker Precedence |
 | 06 | [zero-float.md](references/06-zero-float.md) | Shadow Entry, Fibo Master, Quasimodo, Sweep Ceiling |
-| 07 | [entry-models.md](references/07-entry-models.md) | 18 modelet e hyrjes (ICT 2022, MMXM, RIFVG, etj.) |
+| 07 | [entry-models.md](references/07-entry-models.md) | 19 modelet e hyrjes (ICT 2022, MMXM, RIFVG, Venom, etj.) |
 | 08 | [risk-management.md](references/08-risk-management.md) | ATR Stop, Position Sizing, Sweep Buffer |
 | 09 | [london-ny-am-pm.md](references/09-london-ny-am-pm.md) | Judas Swing, SD Projections, Macro specifics |
 | 10 | [lifecycle-stages.md](references/10-lifecycle-stages.md) | MMXM/MMBM 4-Stage, Curve Side, Polarity Flip |
