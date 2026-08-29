@@ -391,6 +391,44 @@ test("L24 — a confirmation far from the planned entry is refused rather than c
   assert.equal(fine.actionable, true);
 });
 
+test("L24b — the deployed monitor does not enforce the cap by default", () => {
+  // §19's cap exists as a mechanism, but the service turns it off by
+  // default (ENTRY_DEVIATION_CHECK_ENABLED=false): the evidence engine's
+  // own hold-and-fade check already discards a move that reverses, so a
+  // signal that graduates has already proven itself by not reversing —
+  // often well beyond the zone by the time it does. Capping distance on
+  // top of that stands an entry down for the reason it was safe. This is
+  // the exact case a real XAUUSD momentum trade produced: a late entry,
+  // deep into a move with no room left to turn back, that the cap alone
+  // would have refused as ENTRY_ESCAPED.
+  const farButSafe = evaluateEntryOpportunity(BUY, {
+    mid: 4360,
+    atr: 4,
+    tolerance: 0.1,
+    enforceCap: false,
+  });
+  assert.equal(farButSafe.actionable, true, "distance alone no longer refuses the entry");
+  assert.equal(farButSafe.chase, 30, "the drift is still measured and reported");
+
+  // The two safety checks that are not about distance stay on regardless.
+  const throughTheStop = evaluateEntryOpportunity(
+    { ...BUY, sl: 4325 },
+    { mid: 4320, atr: 4, tolerance: 0.1, enforceCap: false },
+  );
+  assert.equal(throughTheStop.actionable, false);
+  assert.equal(throughTheStop.reason, "RISK_INVERTED");
+
+  const thin = { ...BUY, tp1: 4350 };
+  const noRewardLeft = evaluateEntryOpportunity(thin, {
+    mid: 4345,
+    atr: 4,
+    tolerance: 0.1,
+    enforceCap: false,
+  });
+  assert.equal(noRewardLeft.actionable, false);
+  assert.equal(noRewardLeft.reason, "RR_COLLAPSED");
+});
+
 test("L25 — a better fill than planned is never a missed entry", () => {
   // A buy filling below its entry is a better trade, not a late one.
   const better = evaluateEntryOpportunity(BUY, { mid: 4320, atr: 4, tolerance: 0.1 });
