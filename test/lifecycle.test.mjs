@@ -576,6 +576,21 @@ test("L30 — the confirmation clock runs from the touch, not from registration"
   assert.equal(confirmationDeadlineFor(touched), 85 * 60_000);
   assert.equal(confirmationDeadlineFor(armed), null, "no touch, no clock");
 
+  // But the deployed monitor only enforces that deadline when the
+  // operator armed one. A declared deadline the operator did not ask for
+  // is recorded and reported, never fatal.
+  const unenforced = evaluateTimeWindow(touched, {
+    nowMs: 86 * 60_000,
+    enforceConfirmationDeadline: false,
+  });
+  assert.equal(unenforced.state, "OPEN", "confirmation is still allowed to arrive late");
+  assert.equal(unenforced.deadline, 85 * 60_000, "and the declared deadline is still reported");
+  // The absolute expiry is what still bounds it, deadline or no deadline.
+  assert.equal(
+    evaluateTimeWindow(touched, { nowMs: 151 * 60_000, enforceConfirmationDeadline: false }).state,
+    "EXPIRED",
+  );
+
   // Expiry still outranks everything.
   assert.equal(evaluateTimeWindow(touched, { nowMs: 151 * 60_000 }).state, "EXPIRED");
   // Inside the window nothing is pending, and outside the session it is a

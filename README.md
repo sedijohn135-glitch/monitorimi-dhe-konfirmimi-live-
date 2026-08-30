@@ -207,6 +207,19 @@ the entry behind, `EXPIRED` if it is still nearby and nothing happened.
 Past the **confirmation deadline**: `EXPIRED` if the read never
 completed, `REANALYSIS_REQUIRED` if it completed and a gate held it.
 
+The confirmation deadline is only **enforced** where the operator armed
+one with `CONFIRMATION_DEADLINE_MINUTES`, which is off by default. A
+setup's own `confirmation_deadline_minutes` refines that deadline where
+it applies and is always recorded and reported — it cannot arm one, the
+same way `max_entry_deviation` cannot arm the entry-distance cap. The
+field sits in the analysis template, so a value arrives on every setup —
+twenty minutes on one, seventy-five on the next — and enforcing whatever
+turned up killed setups whose confirmation was still coming. Confirmation
+legitimately arrives later than an analysis guessed: the evidence machine
+waits for proof that persists, and a level can take longer than a
+declared twenty minutes to deliver it. `expiration_minutes` still bounds
+the setup's life either way, so nothing runs forever.
+
 ### When the entry runs away
 
 Price reaching TP1 without you always resolves `ENTRY_MISSED` — not an
@@ -248,7 +261,7 @@ counts.
 | `defence_profile` | what **this** setup must prove after the touch: `standard`, `m1_continuation` or `rejection_displacement`. The monitor never picks one for you |
 | `urgency` | `LOW`/`NORMAL`/`HIGH`/`CRITICAL`. Scales how long evidence must hold and nothing else — it cannot remove a proof, open a gate, or outrank an invalidation |
 | `max_entry_deviation` | how far past the planned entry is still worth entering. **Ignored unless the operator armed capping** with `ENTRY_DEVIATION_CHECK_ENABLED`; sending it cannot arm it. Where it does apply, never honoured beyond half the entry-to-stop distance |
-| `confirmation_deadline_minutes` | how long confirmation may take **once the zone is touched** — the clock runs from the touch, not from registration |
+| `confirmation_deadline_minutes` | how long confirmation may take **once the zone is touched** — the clock runs from the touch, not from registration. **Ignored unless the operator armed a deadline** with `CONFIRMATION_DEADLINE_MINUTES`; sending it cannot arm one |
 | `entry_monitoring_window_minutes` | how long to wait for price to reach the zone at all |
 | `prerequisite_level` + `prerequisite_timeframe` + `prerequisite_rule` | what must print before entry is live at all, e.g. an M15 **body close** below `4324.71`. A wick through it is not a close, and until it prints the watch reports `WAITING_FOR_SETUP_CONFIRMATION` |
 | `invalidation_rule: "body_close"` + `invalidation_timeframe` | a wick above `4368.31` is not invalidation if the rule says body close. Once a trade is open the **stop loss is a hard price line either way**, so this can never leave a position unprotected |
@@ -543,7 +556,7 @@ a complete confirmation sequence, can ask the broker for a position.
 | `ENTRY_DEVIATION_ATR_FRACTION` | `0.75` | volatility term of the cap, when it applies |
 | `ENTRY_DEVIATION_RISK_FRACTION` | `0.3` | ceiling as a fraction of entry-to-stop, when it applies |
 | `ENTRY_MIN_REMAINING_RR` | `0.5` | floor on what remains of the R:R **at the fill**. Deliberately below the 1R registration demands — the acceptance requirement moves the fill up to 0.35R past entry by design, so a 1R floor here would contradict it |
-| `CONFIRMATION_DEADLINE_MINUTES` | `0` (off) | service-wide default for the per-setup deadline |
+| `CONFIRMATION_DEADLINE_MINUTES` | `0` (off) | the **only** thing that arms the confirmation deadline. Off by default, because confirmation legitimately arrives later than an analysis guessed; a setup's own `confirmation_deadline_minutes` refines the deadline but cannot arm it. `expiration_minutes` still bounds the setup either way |
 | `TRADE_TRACKING_ENABLED` | `true` | the post-entry TP/SL lifecycle |
 | `TRADE_WATCH_INTERVAL_MS` / `MAX_TRADE_WATCHES` | `10000` / `10` | its cadence and capacity |
 | `ENTRY_CONFLUENCE_MIN_HITS` | `2` | distinct PDA array types that must cluster at the entry level for confluence to graduate |
