@@ -1316,6 +1316,13 @@ async function tickSetupWatch(watch) {
     nowMs: now,
     killZoneEnabled: false,
     entryTouched: watch.entryTouched === true || safety.action === "TOUCH",
+    // Same asymmetry as the entry-distance cap: the operator arms the
+    // deadline, a registering setup only refines it. The analysis
+    // template carries `confirmation_deadline_minutes`, so a value
+    // arrives on every setup — twenty minutes on one, seventy-five on
+    // the next — and enforcing whatever turned up killed setups whose
+    // confirmation was still coming.
+    enforceConfirmationDeadline: CONFIG.confirmationDeadlineMinutes > 0,
   });
   if (timeWindow.state === "ENTRY_WINDOW_CLOSED") {
     record(watch, "time_window", { state: timeWindow.state, detail: timeWindow.detail }, now);
