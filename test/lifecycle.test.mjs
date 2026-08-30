@@ -16,12 +16,18 @@ import assert from "node:assert/strict";
 import {
   ANTI_SL_DEFAULTS,
   PERIOD_MS,
+  advanceContinuous,
+  advanceDiscrete,
   advanceSlExcursion,
   appendTrail,
   defenceSatisfied,
+  emptyContinuous,
+  emptyDiscrete,
+  emptyEvidence,
   emptyExcursion,
   emptySequence,
   evaluateAntiSl,
+  evaluateConfirmation,
   evaluateEntryOpportunity,
   evaluateSafety,
   confirmationDeadlineFor,
@@ -122,6 +128,23 @@ test("L3 — a fast market with defence enters fast; a fast market without it wa
     defenceSatisfied("standard", { sequence: { rejection: {}, mss: {} } }).satisfied,
     false,
   );
+});
+
+test("L3b — a raised per-symbol hold floor still respects urgency ordering but cannot drop below it", () => {
+  // The real BTCUSD case: a 15-45s hold on a generic floor is short
+  // enough that a wick can clear it without being a durable move.
+  // Passing a symbol-specific floor (e.g. 45s for BTCUSD) raises the
+  // floor for HIGH/CRITICAL urgency while leaving NORMAL/LOW untouched,
+  // since they were already above it.
+  const genericFloor = 15_000;
+  const btcFloor = 45_000;
+  assert.equal(urgencyHoldMs("CRITICAL", 60_000, genericFloor), 15_000, "generic floor: unsafe for BTC");
+  assert.equal(urgencyHoldMs("CRITICAL", 60_000, btcFloor), 45_000, "raised floor: CRITICAL cannot go below it");
+  assert.equal(urgencyHoldMs("HIGH", 60_000, btcFloor), 45_000, "raised floor: HIGH (30s) is lifted to 45s");
+  // NORMAL/LOW were already above the generic floor, so the raised floor
+  // changes nothing for them — the point is the minimum, not a shift.
+  assert.equal(urgencyHoldMs("NORMAL", 60_000, btcFloor), 60_000);
+  assert.equal(urgencyHoldMs("LOW", 60_000, btcFloor), 90_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -499,6 +522,55 @@ test("L27 — a collapsed reward-to-risk is refused even inside a cap the analys
   assert.ok(verdict.chase < verdict.cap, "and the drift is inside it");
   assert.equal(verdict.actionable, false);
   assert.equal(verdict.reason, "RR_COLLAPSED");
+});
+
+test("L27b — RR_COLLAPSED against TP1 is a false read for an analyst targeting TP2", () => {
+  // The real BTCUSD case: entry 78745, stop 78620, tp1 78956, tp2 81447.09.
+  // Confirmation completed at 78844.09 — 0.79R from TP1, under the 0.5R...
+  // no, actually *above* it in this direction check; the real failure was
+  // the opposite drift. Model it directly: price has already run close
+  // enough to TP1 that under half an R remains to it, while TP2/DOL is
+  // still nearly the entire move away. Against TP1 the setup reads
+  // RR_COLLAPSED and resolves ENTRY_MISSED. Against TP2 — the analyst's
+  // actual stated target for this setup, entered instantly on
+  // confirmation rather than on a retrace — the same price is fully
+  // actionable.
+  const btc = {
+    direction: "buy",
+    entry: 78745,
+    sl: 78620,
+    invalidation: 78620,
+    tp1: 78956,
+    tp2: 81447.09,
+  };
+  const options = { mid: 78844.09, atr: 60, tolerance: 0.5, minRemainingRR: 0.5 };
+
+  const againstTp1 = evaluateEntryOpportunity(btc, { ...options, enforceCap: false, rrTarget: "tp1" });
+  assert.equal(againstTp1.actionable, false, "TP1 alone is too close to clear the floor");
+  assert.equal(againstTp1.reason, "RR_COLLAPSED");
+
+  const againstTp2 = evaluateEntryOpportunity(btc, { ...options, enforceCap: false, rrTarget: "tp2" });
+  assert.equal(againstTp2.actionable, true, "TP2 — the setup's real target — is nowhere near collapsed");
+  assert.equal(againstTp2.reason, "ACTIONABLE");
+  assert.ok(againstTp2.remainingRR > 10, "the DOL is most of the move away, not a sliver of an R");
+
+  // Default is tp2 — analysts whose target is TP2/DOL do not have to opt
+  // in per-watch, since the original bug surfaced on a setup that was
+  // still fully alive toward TP2 and the per-watch opt-in only exists for
+  // setups that explicitly want to fall back to TP1.
+  const defaulted = evaluateEntryOpportunity(btc, { ...options, enforceCap: false });
+  assert.equal(defaulted.actionable, true, "default rrTarget is tp2 unless declared otherwise");
+
+  // A watch that explicitly opts back into TP1 (e.g. a setup that genuinely
+  // targets TP1, not TP2) is honoured.
+  const explicitTp1 = evaluateEntryOpportunity(btc, { ...options, enforceCap: false, rrTarget: "tp1" });
+  assert.equal(explicitTp1.actionable, false, "explicit tp1 is honoured when set");
+
+  // A watch with no tp2 set falls back to tp1 even when tp2 is the default,
+  // rather than silently treating a missing target as infinite reward.
+  const noTp2 = { ...btc, tp2: undefined };
+  const fallback = evaluateEntryOpportunity(noTp2, { ...options, enforceCap: false });
+  assert.equal(fallback.actionable, false, "falls back to tp1 behaviour when tp2 is absent");
 });
 
 // ---------------------------------------------------------------------------
@@ -938,4 +1010,69 @@ test("L50 — progress and acceptance are measured in the same R", () => {
   const forward = evaluateEntryOpportunity(wideThesis, { mid: 4340, atr: 40, tolerance: 0.1 });
   assert.equal(forward.remainingRisk, 30);
   assert.equal(forward.cap, 6, "the deviation cap is a fraction of entry-to-stop, not of the thesis distance");
+});
+
+// ---------------------------------------------------------------------------
+// §15A continued — the evidence hold itself, not just the sequence, has
+// to restart when an SL excursion survives.
+
+test("L51 — emptyEvidence is every stream un-graduated, matching evaluateConfirmation's shape", () => {
+  const fresh = emptyEvidence();
+  assert.deepEqual(fresh.structure, emptyDiscrete());
+  assert.deepEqual(fresh.crossMarket, emptyDiscrete());
+  assert.deepEqual(fresh.pricePattern, emptyDiscrete());
+  assert.deepEqual(fresh.midnightJudas, emptyDiscrete());
+  assert.deepEqual(fresh.confluence, emptyDiscrete());
+  assert.deepEqual(fresh.acceptance, emptyContinuous());
+  for (const key of ["structure", "crossMarket", "pricePattern", "midnightJudas", "confluence"]) {
+    assert.equal(fresh[key].graduated, false, `${key} must not start graduated`);
+  }
+  assert.equal(fresh.acceptance.graduated, false);
+});
+
+test("L52 — a discrete stream that graduated before an SL excursion stays graduated across it unless the watch resets evidence (the real BTCUSD bug)", () => {
+  // This reproduces the actual failure: a technical read (e.g. a price
+  // pattern) graduates, price runs to the stop and back without ever
+  // trading back through the pattern's source level (so advanceDiscrete's
+  // own fade check never fires), and the very next tick after the
+  // excursion is treated by evaluateConfirmation as already-graduated —
+  // fully confirmed on evidence that is actually stale, from before the
+  // excursion, with none of the hold time it is supposed to need under
+  // fresh observation.
+  const ctx1 = { nowMs: 0, generation: 1, hasBarTime: true, minHoldMs: 45_000 };
+  let slot = advanceDiscrete(null, true, "strong", 4330, "buy", 0.1, ctx1);
+  assert.equal(slot.pending, true);
+  // Advance market time and generation past the hold — graduates.
+  const ctx2 = { nowMs: 50_000, generation: 2, hasBarTime: true, minHoldMs: 45_000 };
+  slot = advanceDiscrete(slot, true, "strong", 4330, "buy", 0.1, ctx2);
+  assert.equal(slot.graduated, true, "sanity: the stream graduated before any excursion");
+
+  // Price now runs to the stop and back. advanceDiscrete only fades a
+  // graduated slot on an *opposite-direction* move past its source price
+  // (line 780ish: `mid < sourceMid - tolerance` for a buy) — an excursion
+  // to the stop on a buy is itself a move against the setup, so in the
+  // buggy path this stays graduated straight through it.
+  const ctx3 = { nowMs: 90_000, generation: 3, hasBarTime: true, minHoldMs: 45_000 };
+  const staleCarry = advanceDiscrete(slot, true, "strong", 4330, "buy", 0.1, ctx3);
+  assert.equal(
+    staleCarry.graduated,
+    true,
+    "confirms the bug's precondition: a graduated slot does not self-heal across an excursion",
+  );
+
+  // The fix: the watch's SURVIVES handler must replace watch.evidence
+  // with emptyEvidence() rather than carrying `slot` forward. Simulating
+  // that reset here and re-running the exact same signal from a truly
+  // fresh state must NOT graduate on the first post-reclaim tick — it
+  // has to pend and wait out a fresh minHoldMs, exactly like a setup
+  // that never had an excursion at all.
+  const resetSlot = emptyDiscrete();
+  const postReclaimFirstTick = advanceDiscrete(resetSlot, true, "strong", 4330, "buy", 0.1, {
+    nowMs: 90_000,
+    generation: 3,
+    hasBarTime: true,
+    minHoldMs: 45_000,
+  });
+  assert.equal(postReclaimFirstTick.graduated, false, "must re-earn the hold, not resume the old one");
+  assert.equal(postReclaimFirstTick.pending, true);
 });

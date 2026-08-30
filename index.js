@@ -81,6 +81,7 @@ import {
   defenceSatisfied,
   displacementCheck,
   emptyExcursion,
+  emptyEvidence,
   emptySequence,
   entryZone,
   evaluateAntiSl,
@@ -175,6 +176,40 @@ const CONFIG = {
   acceptanceRiskFraction: num(process.env.ACCEPTANCE_RISK_FRACTION, 0.35, 0.05),
 
   killZoneEnabled: process.env.KILL_ZONE_FILTER_ENABLED !== "false",
+
+  // Symbols that trade every day of the week. The kill-zone/weekend gate
+  // exists because FX and metals venues actually close on Sat/Sun — crypto
+  // does not, so applying the same "Weekend" block to it stalls a live,
+  // fully-confirmed setup for a condition that is not true for that
+  // symbol. Comma-separated, case-insensitive; defaults cover the two
+  // crypto pairs already wired elsewhere in this config (symbolIdHints,
+  // correlation pairs). This only lifts the *weekend* half of the gate —
+  // NY Lunch and "outside kill zone" still apply if killZoneEnabled, since
+  // those reflect liquidity conditions that affect crypto too, not venue
+  // closure.
+  weekendTradingSymbols: (process.env.WEEKEND_TRADING_SYMBOLS || "BTCUSD,ETHUSD")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean),
+
+  // Per-symbol confirmation-hold floor. Urgency (URGENCY_HOLD_MULTIPLIER)
+  // can shrink the hold to as little as skillContext.holdFloorMs (15s
+  // default) on HIGH/CRITICAL — long enough for a slow FX pair, but a
+  // volatile 24/7 instrument like BTC can produce a wick/spike that
+  // clears "new M1 bar + N seconds held" without being a real, durable
+  // move, and the confirmation graduates on a fake before price reverses
+  // into the stop. This floor is a hard minimum hold for named symbols,
+  // applied after the urgency multiplier — urgency can still shorten the
+  // hold *within* this floor, it just cannot go below it for these
+  // symbols. Format: "SYMBOL:milliseconds,SYMBOL:milliseconds".
+  symbolHoldFloorMs: Object.fromEntries(
+    (process.env.SYMBOL_HOLD_FLOOR_MS || "BTCUSD:45000,ETHUSD:45000")
+      .split(",")
+      .map((pair) => pair.split(":"))
+      .filter(([sym, ms]) => sym && Number.isFinite(Number(ms)) && Number(ms) > 0)
+      .map(([sym, ms]) => [sym.trim().toUpperCase(), Number(ms)]),
+  ),
+
   spreadEnabled: process.env.SPREAD_CHECK_ENABLED !== "false",
   spreadBaselineSamples: num(process.env.SPREAD_BASELINE_SAMPLES, 5, 3),
   spreadHistoryMax: num(process.env.SPREAD_HISTORY_MAX, 20, 5),
@@ -286,6 +321,14 @@ const CONFIG = {
   // refuses anything worse than it. The deviation cap above is the
   // primary guard against chasing; this one catches a collapsed R:R.
   entryMinRemainingRR: num(process.env.ENTRY_MIN_REMAINING_RR, 0.5, 0.1),
+
+  // Which target the remaining-R:R floor above is measured against.
+  // "tp1" (default) preserves prior behaviour. "tp2" is for analysts whose
+  // entry style fills instantly on real-confirmation and whose stated
+  // target for the setup is TP2/DOL rather than the interim TP1 — for
+  // them, checking the floor against TP1 produces false ENTRY_MISSED
+  // calls on setups that are still fully alive toward their actual target.
+  entryRRTarget: (process.env.ENTRY_RR_TARGET || "tp2").toLowerCase() === "tp1" ? "tp1" : "tp2",
 
   // §20 The confirmation clock. Absent a per-setup deadline the setup's
   // own expiry is the only boundary, exactly as before.
@@ -1018,9 +1061,10 @@ async function newsStatusForWatch(watch, nowMs = Date.now()) {
 
 async function applyExternalGates(watch, spread) {
   const reasons = [];
-  const session = killZoneStatus();
+  const ignoreWeekend = CONFIG.weekendTradingSymbols.includes(String(watch.symbol || "").toUpperCase());
+  const session = killZoneStatus(Date.now(), { ignoreWeekend });
   if (CONFIG.killZoneEnabled && !session.active) {
-    reasons.push(session.weekend ? "Weekend" : session.inLunch ? "NY Lunch" : "Outside kill zone");
+    reasons.push(session.weekendBlocks ? "Weekend" : session.inLunch ? "NY Lunch" : "Outside kill zone");
   }
   const news = await newsStatusForWatch(watch);
   if (news.blocked) reasons.push(`News: ${news.reason}`);
@@ -1339,6 +1383,7 @@ async function tickSetupWatch(watch) {
       riskFraction: CONFIG.entryDeviationRiskFraction,
       minRemainingRR: CONFIG.entryMinRemainingRR,
       enforceCap: CONFIG.entryDeviationCheckEnabled,
+      rrTarget: watch.entry_rr_target || CONFIG.entryRRTarget,
     });
     watch.lastReason = "entry_window_closed";
     if (!opportunity.actionable) {
@@ -1567,6 +1612,21 @@ async function tickSetupWatch(watch) {
       // action that printed after the reclaim rather than before the
       // excursion: bars from before it described a market that has since
       // been through something.
+      //
+      // The technical-evidence hold (§7) has to restart here too, not
+      // just the rejection/MSS/displacement sequence. A discrete/
+      // continuous slot that already graduated before the excursion
+      // (`graduated: true`) is sticky by design (advanceDiscrete /
+      // advanceContinuous never un-graduate it once true) — so without
+      // this reset, a pattern or acceptance read that graduated *before*
+      // price ran to the stop stays graduated straight through the
+      // excursion, and the very next tick after reclaim can read as
+      // fully re-confirmed with none of the 45s (or urgency-scaled) hold
+      // this evidence is supposed to have to survive under fresh
+      // observation. This is what let a setup go straight from "SL
+      // excursion survived" to "confirmed" on stale pre-excursion
+      // evidence instead of actually re-earning it.
+      watch.evidence = emptyEvidence();
       watch.sequenceAnchorMs = watch.slExcursion.reclaimedAtMs ?? now;
       watch.sequence = emptySequence();
       watch.lifecycle = "TOUCHED";
@@ -1698,11 +1758,18 @@ async function tickSetupWatch(watch) {
   // §24 — urgency scales how long evidence must persist, and nothing
   // else. It cannot remove a required proof, open a gate, or outrank a
   // hard blocker; it only decides how patient the hold is, down to the
-  // same floor every other path is bounded by.
+  // same floor every other path is bounded by — except that floor itself
+  // is raised for symbols configured in symbolHoldFloorMs, because a
+  // 15-45s hold that safely filters a slow FX pair is short enough for a
+  // BTC wick to clear it without being a real, durable move.
+  const effectiveHoldFloorMs = Math.max(
+    CONFIG.skillContext.holdFloorMs,
+    CONFIG.symbolHoldFloorMs[String(watch.symbol || "").toUpperCase()] || 0,
+  );
   const baseHoldMs = urgencyHoldMs(
     watch.urgency,
     CONFIG.minConfirmationHoldMs,
-    CONFIG.skillContext.holdFloorMs,
+    effectiveHoldFloorMs,
   );
 
   // §22/§26 — what this particular setup has to prove, as the analyst
@@ -1778,6 +1845,7 @@ async function tickSetupWatch(watch) {
     riskFraction: CONFIG.entryDeviationRiskFraction,
     minRemainingRR: CONFIG.entryMinRemainingRR,
     enforceCap: CONFIG.entryDeviationCheckEnabled,
+    rrTarget: watch.entry_rr_target || CONFIG.entryRRTarget,
   });
   if (!opportunity.actionable) {
     watch.lastReason = "entry_opportunity_closed";
@@ -2345,7 +2413,8 @@ async function attemptTrapPromotion(watch, { bars, symbolId, nowMs, news, tolera
   // auto_promote:true does not arm promotion — only the operator's
   // environment does, exactly as with auto_trade.
   const enabled = config.enabled && watch.auto_promote !== false;
-  const session = killZoneOutlook(nowMs, config.killZoneLookaheadMinutes);
+  const ignoreWeekend = CONFIG.weekendTradingSymbols.includes(String(watch.symbol || "").toUpperCase());
+  const session = killZoneOutlook(nowMs, config.killZoneLookaheadMinutes, { ignoreWeekend });
   const ratio = confirmingDisplacement(bars, { window: config.displacementWindow });
 
   const gates = evaluatePromotionGates({
@@ -2698,7 +2767,8 @@ async function tickTrapWatch(watch) {
     return;
   }
 
-  const session = killZoneStatus();
+  const ignoreWeekend = CONFIG.weekendTradingSymbols.includes(String(watch.symbol || "").toUpperCase());
+  const session = killZoneStatus(Date.now(), { ignoreWeekend });
   const news = await newsStatusForWatch(watch);
   const ageHours = (now - watch.armedAtMs) / 3_600_000;
 
@@ -2911,6 +2981,12 @@ const CUSTOM_TOOLS = [
         entry_monitoring_window_minutes: {
           type: "number",
           description: "How long the entry zone is worth watching for a touch at all.",
+        },
+        entry_rr_target: {
+          type: "string",
+          enum: ["tp1", "tp2"],
+          description:
+            "Which target the remaining-R:R floor (ENTRY_MIN_REMAINING_RR, default 0.5R) is measured against when confirmation completes. Default 'tp1'. Set 'tp2' for an entry style that fills instantly on real-confirmation and whose stated target for THIS setup is TP2/the DOL rather than the interim TP1 — otherwise the floor is checked against a level that was never the actual target, and a setup still fully alive toward TP2 resolves ENTRY_MISSED. Unlike max_entry_deviation, this check (RR_COLLAPSED) is always enforced, so this field is the only way to change what it is measured against. No effect if the watch has no tp2.",
         },
         setup_model: { type: "string" },
         conviction: { type: "string" },
@@ -3188,6 +3264,7 @@ function createSetupWatch(args) {
       defence_profile: watch.defence_profile,
       urgency: watch.urgency,
       max_entry_deviation: watch.max_entry_deviation,
+      entry_rr_target: watch.entry_rr_target || CONFIG.entryRRTarget,
       confirmation_deadline_minutes: watch.confirmation_deadline_minutes,
       entry_monitoring_until: watch.entryMonitoringUntil,
       expires_at: watch.expiresAt,
