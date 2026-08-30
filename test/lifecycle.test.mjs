@@ -554,15 +554,22 @@ test("L27b — RR_COLLAPSED against TP1 is a false read for an analyst targeting
   assert.equal(againstTp2.reason, "ACTIONABLE");
   assert.ok(againstTp2.remainingRR > 10, "the DOL is most of the move away, not a sliver of an R");
 
-  // Default stays tp1 — this is opt-in, not a silent behaviour change for
-  // every other setup already relying on the TP1 floor.
+  // Default is tp2 — analysts whose target is TP2/DOL do not have to opt
+  // in per-watch, since the original bug surfaced on a setup that was
+  // still fully alive toward TP2 and the per-watch opt-in only exists for
+  // setups that explicitly want to fall back to TP1.
   const defaulted = evaluateEntryOpportunity(btc, { ...options, enforceCap: false });
-  assert.equal(defaulted.actionable, false, "default rrTarget is still tp1 unless declared otherwise");
+  assert.equal(defaulted.actionable, true, "default rrTarget is tp2 unless declared otherwise");
 
-  // A watch with no tp2 set falls back to tp1 even when tp2 is requested,
+  // A watch that explicitly opts back into TP1 (e.g. a setup that genuinely
+  // targets TP1, not TP2) is honoured.
+  const explicitTp1 = evaluateEntryOpportunity(btc, { ...options, enforceCap: false, rrTarget: "tp1" });
+  assert.equal(explicitTp1.actionable, false, "explicit tp1 is honoured when set");
+
+  // A watch with no tp2 set falls back to tp1 even when tp2 is the default,
   // rather than silently treating a missing target as infinite reward.
   const noTp2 = { ...btc, tp2: undefined };
-  const fallback = evaluateEntryOpportunity(noTp2, { ...options, enforceCap: false, rrTarget: "tp2" });
+  const fallback = evaluateEntryOpportunity(noTp2, { ...options, enforceCap: false });
   assert.equal(fallback.actionable, false, "falls back to tp1 behaviour when tp2 is absent");
 });
 

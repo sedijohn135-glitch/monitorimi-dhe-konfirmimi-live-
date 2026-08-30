@@ -328,7 +328,7 @@ const CONFIG = {
   // target for the setup is TP2/DOL rather than the interim TP1 — for
   // them, checking the floor against TP1 produces false ENTRY_MISSED
   // calls on setups that are still fully alive toward their actual target.
-  entryRRTarget: (process.env.ENTRY_RR_TARGET || "tp1").toLowerCase() === "tp2" ? "tp2" : "tp1",
+  entryRRTarget: (process.env.ENTRY_RR_TARGET || "tp2").toLowerCase() === "tp1" ? "tp1" : "tp2",
 
   // §20 The confirmation clock. Absent a per-setup deadline the setup's
   // own expiry is the only boundary, exactly as before.
