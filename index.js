@@ -131,6 +131,7 @@ import {
 } from "./lib/promotion.mjs";
 import { Notifier } from "./lib/notify.mjs";
 import { WatchStore, publicWatch } from "./lib/store.mjs";
+import { parseSetupText } from "./lib/parse-setup.mjs";
 
 // ---------------------------------------------------------------------------
 // §1 Configuration
@@ -527,6 +528,101 @@ app.use(
   }),
 );
 app.use(express.urlencoded({ extended: true }));
+// The /paste_setup endpoint accepts the operator's setup as raw text —
+// not as JSON. Without this parser, express leaves text/plain bodies
+// unread, so req.body is empty.
+app.use(express.text({ type: ["text/plain", "text/*"], limit: "256kb" }));
+
+// Inline HTML page for /paste. Kept here as a constant so there is no
+// extra file to deploy and so the auth token is read from the same
+// place every request uses.
+const PAGE_PASTE_SETUP = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Paste setup — Watch Monitor</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; padding: 0;
+    background: #0c0e12; color: #e6e8eb;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 24px 20px 80px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { color: #9aa3ad; margin: 0 0 18px; font-size: 13px; }
+  label { display: block; margin: 12px 0 6px; color: #9aa3ad; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  input, textarea {
+    width: 100%; box-sizing: border-box;
+    background: #15181d; color: #e6e8eb;
+    border: 1px solid #2a2f37; border-radius: 6px;
+    padding: 8px 10px; font: inherit;
+  }
+  textarea { min-height: 280px; font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace; font-size: 13px; }
+  button {
+    margin-top: 14px;
+    background: #2563eb; color: white; border: 0; border-radius: 6px;
+    padding: 10px 16px; font: inherit; cursor: pointer;
+  }
+  button:disabled { opacity: .6; cursor: progress; }
+  pre.out {
+    margin-top: 18px; padding: 12px;
+    background: #15181d; border: 1px solid #2a2f37; border-radius: 6px;
+    white-space: pre-wrap; word-break: break-word; font-size: 12px;
+  }
+  .ok { color: #4ade80; }
+  .err { color: #f87171; }
+  .warn { color: #fbbf24; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Paste setup</h1>
+  <p class="sub">Drop the trade setup text below (bordered ICT table, plain notes, anything). The server parses it and registers a watch — same monitoring as a direct <code>register_watch</code> call.</p>
+
+  <label for="token">Auth token (if set on the server)</label>
+  <input id="token" type="password" placeholder="leave blank if not set" autocomplete="off" />
+
+  <label for="body">Setup text</label>
+  <textarea id="body" placeholder="INSTRUMENT : XAUUSD&#10;DIRECTION : LONG&#10;ENTRY ZONE : 4424.50 – 4426.00&#10;SL ZONE : 4419.00&#10;TARGET 1 : 4435.50&#10;TARGET 2 : 4440.00&#10;TARGET 3 : 4452.50"></textarea>
+
+  <button id="send">Send to monitor</button>
+
+  <pre id="out" class="out">No request sent yet.</pre>
+</main>
+
+<script>
+  const out = document.getElementById("out");
+  function show(text, cls) {
+    out.className = "out" + (cls ? " " + cls : "");
+    out.textContent = text;
+  }
+  document.getElementById("send").addEventListener("click", async () => {
+    const body = document.getElementById("body").value;
+    const token = document.getElementById("token").value.trim();
+    if (!body.trim()) { show("Setup text is empty.", "err"); return; }
+    const btn = document.getElementById("send");
+    btn.disabled = true; btn.textContent = "Sending…";
+    try {
+      const headers = { "Content-Type": "text/plain; charset=utf-8" };
+      if (token) headers["Authorization"] = "Bearer " + token;
+      const resp = await fetch("/paste_setup", { method: "POST", headers, body });
+      const text = await resp.text();
+      let parsed;
+      try { parsed = JSON.parse(text); } catch { parsed = { raw: text }; }
+      const cls = parsed.ok ? "ok" : "err";
+      show(JSON.stringify(parsed, null, 2), cls);
+    } catch (err) {
+      show("Network error: " + err.message, "err");
+    } finally {
+      btn.disabled = false; btn.textContent = "Send to monitor";
+    }
+  });
+</script>
+</body>
+</html>
+`;
 
 function htmlEscape(value) {
   return String(value ?? "")
@@ -3991,6 +4087,68 @@ app.get("/skill_context_audit", async (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
+});
+
+// ---------------------------------------------------------------------------
+// §10b Paste endpoint
+//
+// Accepts free-form trade-setup text (bordered table, plain text, or
+// mix) on a plain POST body and forwards the parsed result to
+// `register_watch`. This is the manual entry path for setups that were
+// produced by hand or by an analysis tool that cannot reach the MCP
+// directly: the operator pastes the same shape they used to send to
+// Gemini/Claude, the server extracts the structured fields, validates
+// them through the same code path register_watch uses, and starts
+// monitoring. Auto-trade stays whatever the operator set it to — this
+// endpoint does not arm it.
+
+app.post("/paste_setup", async (req, res) => {
+  if (rejectUnauthorized(req, res)) return;
+  const raw = String(req.body || "");
+  const { parsed, recognised, missing, warnings } = parseSetupText(raw);
+  if (missing.length > 0) {
+    res.status(400).json({
+      ok: false,
+      error: `Could not extract required fields: ${missing.join(", ")}`,
+      recognised,
+      missing,
+      warnings,
+      parsed,
+    });
+    return;
+  }
+  try {
+    const result = await handleCustomTool("register_watch", parsed);
+    const inner = JSON.parse(result.content[0].text);
+    res.json({
+      ok: true,
+      watch_id: inner.watch_id,
+      lifecycle: inner.lifecycle,
+      stage: inner.stage,
+      auto_trade: inner.auto_trade,
+      recognised,
+      warnings,
+      parsed,
+      message: inner.message,
+    });
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message,
+      recognised,
+      missing,
+      warnings,
+      parsed,
+    });
+  }
+});
+
+// Tiny HTML form so the paste can be done from a browser without any
+// extra tooling. The form posts the textarea body to /paste_setup with
+// the same auth header the rest of the API uses.
+app.get("/paste", (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(PAGE_PASTE_SETUP);
 });
 
 // ---------------------------------------------------------------------------
