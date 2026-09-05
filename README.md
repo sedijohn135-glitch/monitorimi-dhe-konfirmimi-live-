@@ -630,11 +630,57 @@ a complete confirmation sequence, can ask the broker for a position.
 - `POST /register_watch`, `/register_trap_watch` — REST mirrors that share
   the exact tool code path, so the two surfaces cannot drift.
 - `GET /skill_context_audit` — the same, for the skill-context audit.
+- `POST /paste_setup`, `GET /paste` — the manual path, for a setup that
+  was produced somewhere the MCP cannot reach. See below.
 - `get_setup_trail` (MCP tool) — one setup's whole ordered history: every
   state transition, defence step, stop excursion, anti-SL verdict and
   outcome, each with its own event id and the setup's correlation id,
   plus the excursion measurements and the measured decision latency.
 - `GET /test-telegram`, `/test-news`.
+
+## The paste path
+
+`GET /paste` serves a textarea; `POST /paste_setup` takes the same text
+as a plain body. The text is parsed into the `register_watch` shape and
+registered through the identical code path, so a pasted setup is
+monitored exactly like a programmatic one. This is deliberate: the
+analysis that produces a setup and the monitor that validates it are
+separate systems, and the monitor never needs to know which tool wrote
+the text it was handed.
+
+What the parser will not do is guess. It reads labelled lines and leaves
+a field out rather than invent it — but the analysis text describes *two*
+moves, the trap and the trade, and three rules keep them apart:
+
+- **A trap's direction is not the trade's direction.** `Direction: UP
+  sweep` inside a KURTHI block is the manipulation move. Read as the
+  trade side it inverts the setup, so sweep-shaped values are refused and
+  `After trap → real move: BEARISH` is read instead.
+- **Geometry outranks vocabulary.** `entry`, `sl` and `tp1` admit exactly
+  one consistent side, and they are the numbers that reach the terminal.
+  Where a direction word contradicts them, the word is corrected and the
+  correction is reported in `warnings` — refusing the paste instead would
+  reject a setup whose prices were never in doubt.
+- **The KURTHI landing zone is the entry zone.** `Expected wick to:
+  4372.50 – 4376.00` is the zone Active validation waits at, so it is
+  adopted as `entry_zone_low`/`entry_zone_high` — but only when it sits
+  consistently with the entry and the stop. An explicit `ENTRY ZONE`
+  always outranks it.
+
+Labels survive the decoration a chat model puts around them: bordered
+tables, `**bold**`, bullets and numbered lists all parse. Comma group
+separators are read as such, so `108,450.00` is a hundred and eight
+thousand, not `108.45`.
+
+Every field the parser filled in by inference is named in the response's
+`warnings`, alongside `recognised` and the full `parsed` object. Read
+them — a setup that registered is not the same as a setup that was read
+the way you meant it.
+
+The paste path does not arm auto-trade and does not choose a defence
+profile. Without a `VALIDATION MODE` line the monitor uses `standard`:
+zone rejection, then an M5 structure shift, then displacement — the
+Active validation the analysis expects.
 
 ## Deploying
 
