@@ -632,11 +632,47 @@ a complete confirmation sequence, can ask the broker for a position.
 - `GET /skill_context_audit` — the same, for the skill-context audit.
 - `POST /paste_setup`, `GET /paste` — the manual path, for a setup that
   was produced somewhere the MCP cannot reach. See below.
+- `get_chart_image` (MCP tool) — a candlestick chart as a PNG, drawn from
+  the feed's own OHLC bars. See below.
 - `get_setup_trail` (MCP tool) — one setup's whole ordered history: every
   state transition, defence step, stop excursion, anti-SL verdict and
   outcome, each with its own event id and the setup's correlation id,
   plus the excursion measurements and the measured decision latency.
 - `GET /test-telegram`, `/test-news`.
+
+## Charts as pictures
+
+`get_chart_image` renders candles to a PNG and returns it as an MCP image
+block. It exists because an analysis that reads market structure —
+displacement, swing points, fair value gaps, where a trap will land — is
+doing pattern recognition, and a vision model does that far better from a
+picture than from a JSON array of several hundred bars. The numbers are
+richer than any screenshot; the picture is the interface the model reads
+them best through. Drawing the chart here gets both: the levels in the
+image ARE the live levels, to the tick, because they come from the same
+bars the monitor watches.
+
+Called with a symbol it fetches that timeframe and draws it. Called with
+no symbol it returns a fixed demo chart, and that is the point of the
+demo: **an MCP client that silently drops image content is
+indistinguishable from one that had nothing to show.** Ask the model what
+it sees. If it describes candles, that client delivers images to the
+model and the whole approach is available; if it only reports the
+metadata, it does not, and the images have to reach the model some other
+way. Claude renders MCP image blocks; Gemini's `functionResponse` part
+carries text only, which its CLI works around client-side
+([gemini-cli#2136](https://github.com/google-gemini/gemini-cli/issues/2136))
+— so the answer differs per client, and the demo chart is how you find
+out in one call rather than after building a renderer.
+
+`levels` draws dashed rules for the entry, stop and targets, and widens
+the axis to include them: a stop beyond the highest high would otherwise
+be clipped, and the chart would quietly omit the one line the read most
+depends on.
+
+The PNG encoder is written against `node:zlib` rather than pulled from
+npm. A service whose job is to stay up for weeks should not take a
+native-dependency risk for what amounts to rectangles and lines.
 
 ## The paste path
 
