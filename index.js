@@ -91,6 +91,7 @@ import {
   evaluateTimeWindow,
   evaluateTradeProgress,
   finiteNumber,
+  normalizeTimeframe,
   formatLevel,
   forwardValidationState,
   fvgCheck,
@@ -129,6 +130,7 @@ import {
   evaluatePromotionGates,
   killZoneOutlook,
 } from "./lib/promotion.mjs";
+import { renderCandles, demoBars } from "./lib/chart-image.mjs";
 import { Notifier } from "./lib/notify.mjs";
 import { WatchStore, publicWatch } from "./lib/store.mjs";
 import { parseSetupText } from "./lib/parse-setup.mjs";
@@ -3094,6 +3096,26 @@ const CUSTOM_TOOLS = [
     annotations: { readOnlyHint: true }
   },
   {
+    name: "get_chart_image",
+    description:
+      "Renders a candlestick chart as a PNG from the live feed's own OHLC bars, so the picture and the numbers are the same data — the levels in the image are the live levels, to the tick. Call it once per timeframe when the analysis reads structure visually rather than arithmetically. Called with no symbol it returns a fixed demo chart instead: that is the cheapest way to find out whether a given MCP client actually delivers image content to the model, because a client that silently drops images looks exactly like one that had nothing to show.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        symbol: { type: "string", description: "For example XAUUSD or BTCUSD. Omit it for the demo chart." },
+        timeframe: { type: "string", enum: TRAP_TIMEFRAMES, description: "Defaults to M15. Ignored by the demo chart." },
+        bars: { type: "number", description: "How many candles to draw. Default 120, capped at 400." },
+        levels: {
+          type: "array",
+          items: { type: "number" },
+          description: "Prices to draw as dashed rules — entry, stop, targets. They also widen the axis, so a stop outside the candle range stays visible instead of vanishing.",
+        },
+      },
+    },
+    annotations: { readOnlyHint: true }
+  },
+  {
     name: "list_watches",
     description:
       "Returns active setup watches, active trap watches, tracked open trades, quarantined watches, bounded recent outcomes with their real status and evidence, and the monitor's own health (restart recovery, undelivered notifications, feed quality). Each watch reports its `stage` on the setup state machine, including ANTI_SL_EVALUATION while a stop excursion is being classified, and resolved watches distinguish ENTRY_MISSED and REANALYSIS_REQUIRED from EXPIRED and INVALIDATED.",
@@ -3362,6 +3384,22 @@ function createTrapWatch(args) {
 
 function textResult(payload) {
   return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+}
+
+/**
+ * A tool result carrying a picture as well as its description.
+ *
+ * The text block goes first on purpose: a client that does not render
+ * image content still gets the metadata, so the caller can tell "this
+ * client dropped the image" apart from "the tool returned nothing".
+ */
+function imageResult(png, meta) {
+  return {
+    content: [
+      { type: "text", text: JSON.stringify(meta, null, 2) },
+      { type: "image", data: png.toString("base64"), mimeType: "image/png" },
+    ],
+  };
 }
 
 /**
@@ -3671,6 +3709,49 @@ async function handleCustomTool(name, args = {}) {
       });
     }
     return textResult(result);
+  }
+
+  if (name === "get_chart_image") {
+    const demo = !args.symbol;
+    let bars;
+    let symbol = "DEMO";
+    let timeframe = "DEMO";
+
+    if (demo) {
+      bars = demoBars();
+    } else {
+      symbol = String(args.symbol).trim().toUpperCase();
+      timeframe = normalizeTimeframe(args.timeframe || "M15");
+      if (!timeframe) throw new Error("timeframe is not a known timeframe");
+      const requested = finiteNumber(args.bars);
+      const count = Math.min(400, Math.max(20, Math.round(requested ?? 120)));
+      const ids = await market.resolveSymbols([symbol]);
+      const symbolId = ids.get(symbol);
+      if (symbolId === undefined) {
+        throw new Error(`${symbol} is not available on the connector`);
+      }
+      bars = await market.bars(symbol, symbolId, timeframe, count);
+      if (!Array.isArray(bars) || bars.length === 0) {
+        throw new Error(`no candles came back for ${symbol} ${timeframe}`);
+      }
+    }
+
+    const levels = (Array.isArray(args.levels) ? args.levels : [])
+      .map((price) => finiteNumber(price))
+      .filter((price) => price !== null)
+      .map((price) => ({ price }));
+
+    const png = renderCandles(bars, { levels });
+    return imageResult(png, {
+      symbol,
+      timeframe,
+      bars: bars.length,
+      levels: levels.map((level) => level.price),
+      demo,
+      note: demo
+        ? "Demo chart. If you can see candles, this client delivers MCP image content."
+        : "Rendered from the live feed's own OHLC — the picture and the numbers are the same data.",
+    });
   }
 
   if (name === "list_watches") {
