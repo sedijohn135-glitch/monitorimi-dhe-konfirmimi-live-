@@ -223,7 +223,7 @@ STOP LOSS : 4384.50
 TP1 : 4348.00`);
   assert.equal(parsed.entry_zone_low, null);
   assert.equal(parsed.entry, 4374.5);
-  assert.ok(warnings.some((w) => /KURTHI zone .* ignored/.test(w)));
+  assert.ok(warnings.some((w) => /KURTHI zone.*ignored/.test(w)));
 });
 
 test("PS14 — an explicit ENTRY ZONE outranks the trap zone", () => {
@@ -310,4 +310,79 @@ test("PS18 — empty and narrative-only text report what is missing", () => {
   );
   assert.ok(narrative.missing.includes("entry"));
   assert.ok(narrative.missing.includes("sl"));
+});
+
+// ---------------------------------------------------------------------------
+// §single-level — the V13 table writes "ENTRY ZONE : [Level]", one number
+// under a zone label. Recorded as low === high it failed validation, and
+// that refused every setup drawn from the template's own layout.
+
+test("PS19 — a single-number ENTRY ZONE is a level, not a zero-width zone", () => {
+  const text = `INSTRUMENT      : BTCUSD
+DIRECTION       : SHORT
+ENTRY ZONE      : 79935.00 (M1 Bearish FVG / OTE)
+SL ZONE         : 80012.00
+TARGET 1        : 79631.00`;
+  const { parsed, missing } = parseSetupText(text);
+  assert.deepEqual(missing, []);
+  assert.equal(parsed.entry, 79935);
+  assert.equal(parsed.entry_zone_low, null, "no zone is invented around the level");
+  assert.equal(parsed.entry_zone_high, null);
+  assert.doesNotThrow(() => validateWatchInput(parsed), "this used to throw on low >= high");
+});
+
+test("PS20 — an explicit entry price outranks the single-level zone", () => {
+  const { parsed } = parseSetupText(`INSTRUMENT : BTCUSD
+DIRECTION : SHORT
+ENTRY ZONE : 79950.00
+SNIPER 0 FLOAT ENTRY PRICE : 79935.00
+STOP LOSS : 80012.00
+TP1 : 79631.00`);
+  assert.equal(parsed.entry, 79935);
+});
+
+// ---------------------------------------------------------------------------
+// §label-qualifier and §zone-choice.
+
+test("PS21 — a parenthetical qualifier does not hide the label", () => {
+  const { parsed } = parseSetupText(`INSTRUMENT : BTCUSD
+DIRECTION : SHORT
+Fibo Master Sniper Zone (5.0-16.8): 79,935.00 - 80,011.00
+SNIPER 0 FLOAT ENTRY PRICE : 79935.00
+STOP LOSS : 80012.00
+TARGET 1 (M15 Swing Low) : 79631.00`);
+  assert.equal(parsed.tp1, 79631, "the TP label survives its qualifier");
+  assert.equal(parsed.entry_zone_low, 79935);
+  assert.equal(parsed.entry_zone_high, 80011);
+});
+
+test("PS22 — among several named zones the consistent one is chosen", () => {
+  // The landing zone belongs to the sweep above the stop; the Fibo zone
+  // is the one the entry actually sits in.
+  const { parsed, warnings } = parseSetupText(`INSTRUMENT : BTCUSD
+DIRECTION : SHORT
+Kurthi landing zone: 80,000.00 - 80,134.53
+Fibo Master Sniper Zone (5.0-16.8): 79,935.00 - 80,011.00
+SNIPER 0 FLOAT ENTRY PRICE : 79935.00
+STOP LOSS : 80012.00
+TP1 : 79631.00`);
+  assert.equal(parsed.entry_zone_low, 79935);
+  assert.equal(parsed.entry_zone_high, 80011);
+  assert.ok(warnings.some((w) => /KURTHI landing zone/.test(w)));
+  assert.doesNotThrow(() => validateWatchInput(parsed));
+});
+
+test("PS23 — when no named zone fits, none is forced and all are reported", () => {
+  const { parsed, warnings } = parseSetupText(`INSTRUMENT : BTCUSD
+DIRECTION : SHORT
+Kurthi landing zone: 80,000.00 - 80,134.53
+Expected wick to: 80,011.00 - 80,134.00
+SNIPER 0 FLOAT ENTRY PRICE : 79935.00
+STOP LOSS : 80012.00
+TP1 : 79631.00`);
+  assert.equal(parsed.entry_zone_low, null);
+  const note = warnings.find((w) => /ignored/.test(w));
+  assert.ok(note, "the refusal is reported");
+  assert.ok(/80000/.test(note) && /80011/.test(note), "both candidates are named");
+  assert.doesNotThrow(() => validateWatchInput(parsed));
 });
