@@ -1,17 +1,8 @@
 # V13 — INPUT OVERRIDE (live data instead of screenshots)
 
-Paste this at the end of the V13 prompt, in the same message.
-
-It replaces V13's `INPUT — MT5 MOBILE SCREENSHOT` section and nothing
-else. Every rule, gate, step and output format in V13 stays exactly as
-written.
-
-It deliberately says nothing about what happens to the setup afterwards.
-An analysis that knows it feeds a live gate starts writing for the gate —
-it hedges, it waits, it produces a verdict instead of a read. That is
-what the previous live-data skill did, and it never emitted a setup.
-Keeping this file ignorant of everything downstream is not an oversight;
-it is the reason it works.
+Paste the block below at the end of the V13 prompt, in the same message.
+It replaces V13's `INPUT — MT5 MOBILE SCREENSHOT` section. Every rule,
+gate, step and output format in V13 stays exactly as written.
 
 ---
 
@@ -72,9 +63,20 @@ THE PRICE RULE
   pixel.
 
 OUTPUT
-  Exactly V13's format. The KURTHI block, the viability check, the
-  bordered setup table, the rationale, and the closing SNIPER SETUP
-  block. Nothing after it.
+  Exactly V13's format: the KURTHI block, the viability check, the
+  bordered setup table, the rationale, and the closing SNIPER SETUP block.
+
+  Then send it:
+
+    register_watch {
+      symbol, direction, entry, sl, tp1, tp2, tp3,
+      entry_zone_low, entry_zone_high  ← KURTHI "Expected wick to" zone
+      setup_model                      ← ENTRY MODEL
+      conviction                       ← CONFIDENCE
+      session                          ← KILL ZONE ACTIVE
+    }
+
+  Report the watch id in one line. Done.
 
 === END INPUT OVERRIDE ===
 ```

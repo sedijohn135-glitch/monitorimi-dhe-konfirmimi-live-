@@ -643,22 +643,17 @@ a complete confirmation sequence, can ask the broker for a position.
 ## Running the analysis from live data
 
 `docs/v13-live-input.md` replaces the screenshot section of a
-screenshot-based analysis prompt and nothing else: where each timeframe
-comes from, and the two connector conventions that are silent when you
-get them wrong — only `fromTimestamp`+`toTimestamp` works on
+screenshot-based analysis prompt and nothing else: which tool serves each
+timeframe role, and the two connector conventions that are silent when
+you get them wrong — only `fromTimestamp`+`toTimestamp` works on
 `get_trendbars`, and its OHLC are raw integers needing ÷100,000 while
 `get_chart_image`'s axis is already real. Plus the rule that keeps the
 two apart: **structure from the picture, every number from the bars.**
 
-It says nothing about the monitor, and that omission is load-bearing. An
-analysis that knows its output feeds a live gate starts writing for the
-gate — it hedges, it waits, it returns a verdict where a read was asked
-for. The skill this repo replaced did exactly that: two hard gates
-demanded proof before a setup could be emitted, and none ever was. The
-same thing happens to any analyst, human or model, who can see the gate
-from where they are standing. Keeping the two apart is what keeps the
-generator generating; the monitor is perfectly capable of refusing on its
-own.
+It ends by mapping V13's output onto `register_watch` and calling it. The
+Kurthi's own landing zone becomes `entry_zone_low`/`entry_zone_high` —
+that band is what Active validation waits at, and a bare entry price arms
+the monitor on a single number price rarely touches exactly.
 
 ## Charts as pictures
 
