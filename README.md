@@ -642,26 +642,23 @@ a complete confirmation sequence, can ask the broker for a position.
 
 ## Running the analysis from live data
 
-`docs/v13-live-adapter.md` is the adapter that lets a screenshot-based
-V13 analysis run from this feed instead: which tool serves which of
-V13's timeframe roles, the two connector conventions that are silent
-when you get them wrong (only `fromTimestamp`+`toTimestamp` works on
-`get_trendbars`; its OHLC are raw integers needing ÷100,000, while the
-chart axis is already real), and the rule that keeps the two apart —
-**structure from the picture, every number from the bars.**
+`docs/v13-live-input.md` replaces the screenshot section of a
+screenshot-based analysis prompt and nothing else: where each timeframe
+comes from, and the two connector conventions that are silent when you
+get them wrong — only `fromTimestamp`+`toTimestamp` works on
+`get_trendbars`, and its OHLC are raw integers needing ÷100,000 while
+`get_chart_image`'s axis is already real. Plus the rule that keeps the
+two apart: **structure from the picture, every number from the bars.**
 
-It closes by calling `register_watch` itself rather than printing a block
-for someone to paste — removing that step is the point. Registering is
-not entering: the monitor still requires the touch, the rejection, the
-structure shift and the displacement, and with auto-trade off a
-registered watch places nothing. The decision stays where it was.
-
-It also carries the posture correction, which matters more than any of
-the mechanics: V13 computes the trap that has **not happened yet**.
-Auditing the sweep that already printed, finding no displacement
-followed, and concluding NO TRADE is the failure mode — it looks like
-rigour and is a generator gating itself, the same way the previous
-live-data skill gated itself into never emitting a setup.
+It says nothing about the monitor, and that omission is load-bearing. An
+analysis that knows its output feeds a live gate starts writing for the
+gate — it hedges, it waits, it returns a verdict where a read was asked
+for. The skill this repo replaced did exactly that: two hard gates
+demanded proof before a setup could be emitted, and none ever was. The
+same thing happens to any analyst, human or model, who can see the gate
+from where they are standing. Keeping the two apart is what keeps the
+generator generating; the monitor is perfectly capable of refusing on its
+own.
 
 ## Charts as pictures
 
