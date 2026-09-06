@@ -687,7 +687,10 @@ Active validation the analysis expects.
 This is a **directory**, not a single file. On Railway or any Node host:
 
 1. Deploy the whole folder; entrypoint stays `node index.js`.
-2. Add a persistent volume and point `STATE_FILE` at it — e.g.
+2. Set the variables in `.env.example` — that file is the short list of
+   what a deployment must be given, with no values in it. Everything it
+   omits has a working default.
+3. Add a persistent volume and point `STATE_FILE` at it — e.g.
    `/data/watch-state.json`. Without a volume the service still runs, but
    the restart-recovery guarantee is lost, and with auto-trade armed that
    guarantee is what stops a restart from resubmitting an order.
