@@ -650,6 +650,12 @@ when you get them wrong (only `fromTimestamp`+`toTimestamp` works on
 chart axis is already real), and the rule that keeps the two apart —
 **structure from the picture, every number from the bars.**
 
+It closes by calling `register_watch` itself rather than printing a block
+for someone to paste — removing that step is the point. Registering is
+not entering: the monitor still requires the touch, the rejection, the
+structure shift and the displacement, and with auto-trade off a
+registered watch places nothing. The decision stays where it was.
+
 It also carries the posture correction, which matters more than any of
 the mechanics: V13 computes the trap that has **not happened yet**.
 Auditing the sweep that already printed, finding no displacement

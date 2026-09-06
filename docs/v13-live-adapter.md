@@ -163,11 +163,92 @@ State the bars behind the entry and the stop so the read can be checked.
 
 Exactly V13's format, unchanged: the KURTHI block, the viability check,
 the bordered setup table, the algorithmic rationale, and the closing
-`SNIPER SETUP` block.
+`SNIPER SETUP` block. Print it in full — it is the record of what was
+read, and the operator checks the numbers against it.
 
-The closing block is what the operator copies into `/paste`, so it must
-be verbatim V13 — the monitor's parser reads it.
+---
 
-Do **not** call `register_watch` unless the operator asks. The paste path
-is deliberate: it is where a human looks at the numbers once before the
-monitor starts watching them.
+## STEP FINAL — REGISTER THE WATCH
+
+Then **call `register_watch` yourself.** Do not ask first, and do not
+tell the operator to paste it — removing that step is the point of this
+adapter. `/paste` exists for analyses that cannot reach the MCP; this one
+can.
+
+Registering is not entering. The monitor still has to see the zone
+touched, then the rejection, the structure shift and the displacement,
+and every gate still applies. Auto-trade being off means a registered
+watch places nothing. What the operator gets is a Telegram confirmation
+— or silence — and the decision stays theirs. A watch registered in
+error is cancelled with `cancel_watch`.
+
+Map V13's output onto the fields directly. This path does **not** go
+through the text parser, so send structure rather than prose:
+
+```
+register_watch {
+  symbol, direction: "buy" | "sell",
+  entry,                          // SNIPER 0 FLOAT ENTRY PRICE
+  entry_zone_low, entry_zone_high,// the KURTHI landing / expected-wick zone
+  sl,                             // STOP LOSS
+  tp1, tp2, tp3,
+  setup_model,                    // ENTRY MODEL
+  conviction,                     // CONFIDENCE
+  session,                        // KILL ZONE ACTIVE
+  expiration_minutes,             // how long this read stays fresh
+  skill_context: { ... }          // see below
+}
+```
+
+**The Kurthi zone is the entry zone.** `Expected wick to: 79815 – 79850`
+becomes `entry_zone_low: 79815, entry_zone_high: 79850`. That is the band
+Active validation waits at; sending only a bare entry price arms the
+monitor on a single number and it will usually never be touched exactly.
+
+### What registration refuses, and why
+
+Validation rejects rather than guesses. Check these before calling, or
+the call fails and the setup is lost while price moves:
+
+| Rule | |
+|---|---|
+| buy | `entry > sl` **and** `tp1 > entry` |
+| sell | `entry < sl` **and** `tp1 < entry` |
+| tp2 / tp3 | same side of entry as tp1 |
+| zone | `entry_zone_low < entry_zone_high`, entry inside it |
+| zone + stop | buy: `sl < entry_zone_low` · sell: `sl > entry_zone_high` |
+| reward | `tp1` at least **1R** from entry |
+
+A single-number "zone" (`low == high`) is refused — send no zone at all
+rather than a zero-width one.
+
+### skill_context — send it every time
+
+It changes no confirmation decision. It is scored against the outcome by
+`get_skill_context_audit`, which is the only way to find out whether V13's
+own convictions hold up over twenty or thirty setups instead of over a
+feeling:
+
+```
+skill_context: {
+  htf_bias:        "bearish" | "bullish",
+  trap_phase:      where the Kurthi is in its own lifecycle,
+  liquidity_swept: true when the pool the setup is built on is already taken,
+  liquidity_target: the draw on liquidity being aimed at,
+  conviction:      "HIGH" | "MEDIUM" | "LOW",
+  note:            one line on what the read rests on
+}
+```
+
+Send it truthfully. A context tuned to look good makes the audit
+worthless, and the audit is the only instrument that can eventually tell
+the operator whether this pipeline is better than the one it replaced.
+
+---
+
+## AFTER REGISTERING
+
+Report in one line: the watch id, the stage it entered, and whether
+auto-trade would execute (it should say it will not). Then stop.
+
+The monitor takes it from there.
