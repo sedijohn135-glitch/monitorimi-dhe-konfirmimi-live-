@@ -640,6 +640,23 @@ a complete confirmation sequence, can ask the broker for a position.
   plus the excursion measurements and the measured decision latency.
 - `GET /test-telegram`, `/test-news`.
 
+## Running the analysis from live data
+
+`docs/v13-live-adapter.md` is the adapter that lets a screenshot-based
+V13 analysis run from this feed instead: which tool serves which of
+V13's timeframe roles, the two connector conventions that are silent
+when you get them wrong (only `fromTimestamp`+`toTimestamp` works on
+`get_trendbars`; its OHLC are raw integers needing ÷100,000, while the
+chart axis is already real), and the rule that keeps the two apart —
+**structure from the picture, every number from the bars.**
+
+It also carries the posture correction, which matters more than any of
+the mechanics: V13 computes the trap that has **not happened yet**.
+Auditing the sweep that already printed, finding no displacement
+followed, and concluding NO TRADE is the failure mode — it looks like
+rigour and is a generator gating itself, the same way the previous
+live-data skill gated itself into never emitting a setup.
+
 ## Charts as pictures
 
 `get_chart_image` renders candles to a PNG and returns it as an MCP image
