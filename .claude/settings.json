@@ -1,0 +1,34 @@
+{
+  "extraKnownMarketplaces": {
+    "addy-agent-skills": {
+      "source": { "source": "github", "repo": "sedijohn135-glitch/agent-skills" }
+    },
+    "ponytail": {
+      "source": { "source": "github", "repo": "sedijohn135-glitch/ponytail" }
+    },
+    "graphify": {
+      "source": { "source": "github", "repo": "sedijohn135-glitch/graphify" }
+    },
+    "ruflo": {
+      "source": { "source": "github", "repo": "sedijohn135-glitch/ruflo" }
+    }
+  },
+  "enabledPlugins": {
+    "agent-skills@addy-agent-skills": true,
+    "ponytail@ponytail": true,
+    "graphify@graphify": true,
+    "ruflo-core@ruflo": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/install-plugins.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

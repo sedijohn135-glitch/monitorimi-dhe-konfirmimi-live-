@@ -30,9 +30,11 @@ import {
   stageOf,
   trailEvent,
   urgencyHoldMs,
+  priceInEntryZone,
+  proximityHoldMs,
   validateWatchInput,
 } from "../lib/core.mjs";
-import { WatchStore } from "../lib/store.mjs";
+import { WatchStore, publicWatch } from "../lib/store.mjs";
 
 const M1 = PERIOD_MS.M1;
 const M5 = PERIOD_MS.M5;
@@ -938,4 +940,156 @@ test("L50 — progress and acceptance are measured in the same R", () => {
   const forward = evaluateEntryOpportunity(wideThesis, { mid: 4340, atr: 40, tolerance: 0.1 });
   assert.equal(forward.remainingRisk, 30);
   assert.equal(forward.cap, 6, "the deviation cap is a fraction of entry-to-stop, not of the thesis distance");
+});
+
+// ---------------------------------------------------------------------------
+// §19 The fill contract. The operator opens a market order straight from
+// the Telegram message without looking at a chart, so a confirmation is a
+// promise that the trade he is about to take is the trade the analysis
+// described. These replay the monitor's own live confirmations: all three
+// were notified as "ENTER NOW" with the analysed ratio, and two of them
+// were no longer that trade by the time the message was sent.
+
+/** The three XAUUSD confirmations as the monitor actually resolved them. */
+const LIVE_CONFIRMATIONS = [
+  { id: "XAUUSD_17885", entry: 4425.5, sl: 4431.5, tp1: 4395, fill: 4422.58, rrPlanned: 5.08, rrFill: 3.09 },
+  { id: "XAUUSD_17883", entry: 4377.5, sl: 4382.5, tp1: 4365.84, fill: 4373.51, rrPlanned: 2.33, rrFill: 0.85 },
+  { id: "XAUUSD_17882", entry: 4374.5, sl: 4384.5, tp1: 4348, fill: 4368.05, rrPlanned: 2.65, rrFill: 1.22 },
+];
+
+test("L51 — the ratio the analysis promised is reported alongside the one that survived", () => {
+  // Without both numbers the notification cannot state a contract: 1.22R
+  // is only alarming next to the 2.65R it was sold as.
+  for (const row of LIVE_CONFIRMATIONS) {
+    const watch = { direction: "sell", entry: row.entry, sl: row.sl, tp1: row.tp1 };
+    const shape = evaluateEntryOpportunity(watch, { mid: row.fill, atr: 2, tolerance: 0.1, minRemainingRR: 0.1, enforceCap: false });
+    assert.equal(Number(shape.rrPlanned.toFixed(2)), row.rrPlanned, `${row.id} planned R`);
+    assert.equal(Number(shape.remainingRR.toFixed(2)), row.rrFill, `${row.id} R at the fill`);
+    assert.equal(shape.riskPlanned, Math.abs(row.entry - row.sl));
+  }
+});
+
+test("L52 — the 0.5R floor let two of three live confirmations through as different trades", () => {
+  // This is the defect, stated as a test so it cannot come back: at 0.5
+  // the gate passed a 0.85R fill that had been analysed at 2.33R.
+  const passed = LIVE_CONFIRMATIONS.filter(
+    (row) =>
+      evaluateEntryOpportunity(
+        { direction: "sell", entry: row.entry, sl: row.sl, tp1: row.tp1 },
+        { mid: row.fill, atr: 2, tolerance: 0.1, minRemainingRR: 0.5, enforceCap: false },
+      ).actionable,
+  );
+  assert.equal(passed.length, 3, "every one of them was notified as ENTER NOW");
+});
+
+test("L53 — the 1.5R floor refuses exactly the two that had stopped being the analysed trade", () => {
+  const verdicts = LIVE_CONFIRMATIONS.map((row) => ({
+    id: row.id,
+    ...evaluateEntryOpportunity(
+      { direction: "sell", entry: row.entry, sl: row.sl, tp1: row.tp1 },
+      { mid: row.fill, atr: 2, tolerance: 0.1, minRemainingRR: 1.5, enforceCap: false },
+    ),
+  }));
+  assert.equal(verdicts[0].actionable, true, "3.09R is still the trade that was analysed");
+  assert.equal(verdicts[1].actionable, false);
+  assert.equal(verdicts[1].reason, "RR_COLLAPSED");
+  assert.equal(verdicts[2].actionable, false);
+  assert.equal(verdicts[2].reason, "RR_COLLAPSED");
+});
+
+test("L54 — a refusal says what was promised, not only what is left", () => {
+  const row = LIVE_CONFIRMATIONS[1];
+  const verdict = evaluateEntryOpportunity(
+    { direction: "sell", entry: row.entry, sl: row.sl, tp1: row.tp1 },
+    { mid: row.fill, atr: 2, tolerance: 0.1, minRemainingRR: 1.5, enforceCap: false },
+  );
+  assert.match(verdict.detail, /0\.85R remains/);
+  assert.match(verdict.detail, /2\.33R planned/);
+  assert.match(verdict.detail, /1\.5R is the floor/);
+});
+
+test("L55 — a fill better than the plan is never refused for drifting", () => {
+  // A sell filling above its planned entry is a better trade. Only drift
+  // that makes the fill worse may ever count against it.
+  const better = evaluateEntryOpportunity(
+    { direction: "sell", entry: 4405, sl: 4413.5, tp1: 4385 },
+    { mid: 4408, atr: 2, tolerance: 0.1, minRemainingRR: 1.5, enforceCap: true },
+  );
+  assert.equal(better.actionable, true);
+  assert.ok(better.chase < 0, "the drift is in the operator's favour");
+  assert.ok(better.remainingRR > better.rrPlanned);
+});
+
+// ---------------------------------------------------------------------------
+// §19/§24 The hold, shortened while price is still standing in the zone.
+
+test("L56 — price inside the zone holds only to the floor", () => {
+  const watch = { entry: 4405, sl: 4413.5, tp1: 4385, entry_zone_low: 4404, entry_zone_high: 4406 };
+  assert.equal(priceInEntryZone(watch, 4405.4, 0.1), true);
+  assert.equal(proximityHoldMs(watch, 4405.4, 0.1, 60_000, 15_000), 15_000);
+});
+
+test("L57 — price outside the zone still serves the full hold", () => {
+  // Away from the level the evidence is all there is to trust, so it pays
+  // the full wait. The saving is only ever offered where invalidation is
+  // close enough to make a wrong read cheap.
+  const watch = { entry: 4405, sl: 4413.5, tp1: 4385, entry_zone_low: 4404, entry_zone_high: 4406 };
+  assert.equal(priceInEntryZone(watch, 4409, 0.1), false);
+  assert.equal(proximityHoldMs(watch, 4409, 0.1, 60_000, 15_000), 60_000);
+});
+
+test("L58 — the zone edges count as inside it", () => {
+  // The edge is the level the analyst named; a fill there is the fill that
+  // was planned, so it must not be the one place the saving is withheld.
+  const watch = { entry: 4405, sl: 4413.5, tp1: 4385, entry_zone_low: 4404, entry_zone_high: 4406 };
+  assert.equal(priceInEntryZone(watch, 4404, 0.1), true);
+  assert.equal(priceInEntryZone(watch, 4406, 0.1), true);
+});
+
+test("L59 — shortening never lengthens a hold that was already short", () => {
+  const watch = { entry: 4405, sl: 4413.5, tp1: 4385, entry_zone_low: 4404, entry_zone_high: 4406 };
+  assert.equal(proximityHoldMs(watch, 4405, 0.1, 9_000, 15_000), 9_000);
+});
+
+test("L60 — with no zone declared the derived band still decides", () => {
+  // A setup registered without an explicit zone gets one from tolerance,
+  // so the saving cannot depend on the analyst having filled in a field.
+  const watch = { entry: 4405, sl: 4413.5, tp1: 4385 };
+  assert.equal(priceInEntryZone(watch, 4405.05, 0.1), true);
+  assert.equal(priceInEntryZone(watch, 4406, 0.1), false);
+  assert.equal(priceInEntryZone(watch, null, 0.1), false);
+});
+
+test("L61 — the deviation cap, armed, refuses the one live confirmation that was still a good trade", () => {
+  // This is why the cap stays off and the R:R floor does the work. The cap
+  // is a proxy — it measures distance and infers a worse trade from it —
+  // and on the only three confirmations the monitor has actually made, the
+  // inference is wrong exactly once: XAUUSD_17885 drifted 2.92 against a
+  // cap of 1.80 and was still a 3.09R trade. The floor keeps that one and
+  // refuses the other two; the cap refuses all three.
+  const armed = LIVE_CONFIRMATIONS.map((row) =>
+    evaluateEntryOpportunity(
+      { direction: "sell", entry: row.entry, sl: row.sl, tp1: row.tp1 },
+      { mid: row.fill, atr: 2, tolerance: 0.1, minRemainingRR: 1.5, enforceCap: true },
+    ),
+  );
+  assert.deepEqual(
+    armed.map((v) => v.reason),
+    ["ENTRY_ESCAPED", "ENTRY_ESCAPED", "ENTRY_ESCAPED"],
+    "distance alone cannot tell a chased entry from a good fill",
+  );
+  const floorOnly = evaluateEntryOpportunity(
+    { direction: "sell", entry: LIVE_CONFIRMATIONS[0].entry, sl: LIVE_CONFIRMATIONS[0].sl, tp1: LIVE_CONFIRMATIONS[0].tp1 },
+    { mid: LIVE_CONFIRMATIONS[0].fill, atr: 2, tolerance: 0.1, minRemainingRR: 1.5, enforceCap: false },
+  );
+  assert.equal(floorOnly.actionable, true, "the ratio it would actually get is the question worth asking");
+});
+
+test("L62 — an eroding open trade says so at the top level, not only inside its counter", () => {
+  // The count and the flag were always in the record; the position whose
+  // read has already failed is the one that should not need looking for.
+  const eroding = { ...BUY, lifecycle: "ACTIVE_TRADE", structureFailure: { count: 3, defensiveExit: true } };
+  assert.equal(publicWatch(eroding).degraded, true);
+  assert.equal(publicWatch({ ...BUY, structureFailure: { count: 2, defensiveExit: false } }).degraded, false);
+  assert.equal(publicWatch({ ...BUY }).degraded, false, "a trade with no erosion recorded is not degraded");
 });

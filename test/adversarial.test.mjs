@@ -610,3 +610,115 @@ test("CONFIRMATION — acceptance alone is never enough", () => {
     if (result.strength !== "PENDING_ACCEPTANCE") assert.equal(result.strength, "PENDING_REASON");
   }
 });
+
+// ---------------------------------------------------------------------------
+// §19 The CISD fast lane. Acceptance cannot be satisfied until price has
+// already travelled, so the earliest signal in the set ends up waiting on
+// the latest and the fill lands away from the analysed entry. The lane
+// substitutes "structure broke and price is still on the level" for
+// "price moved, so the level held". These tests exist to make sure the
+// substitution cannot become a way in for anything weaker than that.
+
+const ZONED = {
+  direction: "buy",
+  entry: 100,
+  sl: 99,
+  tp1: 104,
+  entry_zone_low: 99.8,
+  entry_zone_high: 100.2,
+  evidence: {},
+};
+
+const FAST = (over = {}) =>
+  CTX({ cisdFastLane: true, cisdFastLaneRequireStrongPattern: true, inEntryZone: true, ...over });
+
+/** Graduate the evidence over three ticks, the way the monitor does. */
+function graduate(watch, signals, ctxOver = {}) {
+  let state = { ...watch };
+  let result;
+  for (const nowMs of [0, 70_000, 140_000]) {
+    result = evaluateConfirmation(state, signals, FAST({ nowMs, generation: nowMs / 70_000 + 1, ...ctxOver }));
+    state = { ...state, evidence: result.evidence };
+  }
+  return result;
+}
+
+test("FAST LANE — CISD and a strong rejection enter from inside the zone without acceptance", () => {
+  const result = graduate(ZONED, {
+    cisd: true,
+    smt: null,
+    engulfM5: "none",
+    engulfM1: "none",
+    wick: "strong",
+    acceptance: false,
+  });
+  assert.equal(result.enter, true, "the earliest structural proof must not wait on the latest");
+  assert.equal(result.lane, "cisd_fast");
+  assert.ok(!result.signals.includes("Live Acceptance"), "acceptance was never claimed");
+  assert.ok(result.signals.includes("CISD"));
+});
+
+test("FAST LANE — a soft rejection is not a rejection the lane will take", () => {
+  const result = graduate(ZONED, {
+    cisd: true,
+    smt: null,
+    engulfM5: "none",
+    engulfM1: "none",
+    wick: "soft",
+    acceptance: false,
+  });
+  assert.equal(result.enter, false, "soft is the tier that fades; the lane skips acceptance, not proof");
+  assert.equal(result.lane, null);
+});
+
+test("FAST LANE — CISD outside the zone waits, however strong the rejection", () => {
+  // This is the condition that makes the whole substitution safe: inside
+  // the zone slippage is bounded by the zone's own width, so the fill
+  // cannot be a different trade. Outside it there is no such bound, and
+  // entering without acceptance would be exactly the chase the lane is
+  // meant to prevent.
+  const result = graduate(
+    ZONED,
+    { cisd: true, smt: null, engulfM5: "none", engulfM1: "none", wick: "strong", acceptance: false },
+    { inEntryZone: false, mid: 101.4 },
+  );
+  assert.equal(result.enter, false);
+  assert.equal(result.lane, null);
+});
+
+test("FAST LANE — switched off, the standard rule is exactly what it was", () => {
+  const result = graduate(
+    ZONED,
+    { cisd: true, smt: null, engulfM5: "none", engulfM1: "none", wick: "strong", acceptance: false },
+    { cisdFastLane: false },
+  );
+  assert.equal(result.enter, false);
+  assert.equal(result.strength, "PENDING_ACCEPTANCE");
+});
+
+test("FAST LANE — a rejection with no CISD behind it is not a fast lane entry", () => {
+  const result = graduate(ZONED, {
+    cisd: false,
+    smt: null,
+    engulfM5: "none",
+    engulfM1: "none",
+    wick: "strong",
+    acceptance: false,
+  });
+  assert.equal(result.enter, false, "the lane is CISD's earliness, not a general acceptance waiver");
+  assert.equal(result.lane, null);
+});
+
+test("FAST LANE — when both lanes qualify the standard one is what gets reported", () => {
+  const result = graduate(ZONED, {
+    cisd: true,
+    smt: null,
+    engulfM5: "none",
+    engulfM1: "none",
+    wick: "strong",
+    acceptance: true,
+  });
+  assert.equal(result.enter, true);
+  assert.equal(result.lane, "standard", "the stronger proof is the one the audit should see");
+  assert.ok(result.signals.includes("Live Acceptance"));
+});

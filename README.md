@@ -250,6 +250,44 @@ derived from the instrument's volatility and the setup's own risk, never
 a fixed number of points, and only drift that makes the fill *worse*
 counts.
 
+### The fill contract
+
+The argument above holds, and it is still not the whole answer, because it
+answers the wrong question. Distance is a proxy: it measures how far
+price ran and *infers* a worse trade from it. The thing worth protecting
+is not the distance — it is whether the trade on offer is still the trade
+that was analysed. Those come apart, and the monitor's own live
+confirmations are where they came apart:
+
+| Setup | Analysed | At the fill | Slippage | Deviation cap |
+|---|---|---|---|---|
+| `XAUUSD_1788545` | 5.08R | **3.09R** | 2.92 | 1.80 |
+| `XAUUSD_1788372` | 2.33R | **0.85R** | 3.99 | 1.50 |
+| `XAUUSD_1788270` | 2.65R | **1.22R** | 6.45 | 3.00 |
+
+All three were notified as `ENTER NOW` carrying the analysed ratio. Two of
+them had stopped being that trade. And arming the cap would have refused
+all three — including the 3.09R one, which was exactly the trade it
+claimed to be. The cap is wrong in both directions here: too blunt to keep
+the good fill, and not the measurement that catches the bad ones.
+
+So the cap stays off and `ENTRY_MIN_REMAINING_RR` does the work, raised
+from `0.5` to `1.5`. It asks the question directly — what ratio would this
+fill actually get? — and on the same three confirmations it keeps the
+3.09R and refuses the 0.85R and the 1.22R. Below the floor no entry
+notification is sent at all; a `SETUP DEGRADED` message goes out instead,
+naming both ratios, because the operator opens a market order from that
+message without opening a chart and "entry missed" would send him looking
+for the next one when it was the setup that failed, not his timing.
+
+Every confirmation now carries the arithmetic in the message — slippage
+against the cap, risk against plan, R:R against what was analysed — and
+`get_skill_context_audit` reports the same numbers across every
+confirmation under `fill_contract`, so the floor can be judged on
+evidence rather than argued about. An empty `degraded` list over many
+confirmations means it is too loose; degraded entries whose fills were
+fine mean it is too tight.
+
 ### What the setup can declare about itself
 
 `register_watch` takes the analyst's own rules, not just levels:
@@ -271,11 +309,13 @@ counts.
 
 ## Confirmation
 
-Every setup confirms the same way. There is no lane, no shortcut, and no
-per-setup exception the monitor can grant itself — which is the only way
-the operator can predict what it will do.
+Every setup confirms the same way. There are two routes to an entry and
+both are the same for every setup — no per-setup exception the monitor can
+grant itself, and nothing a registering client can ask for that another
+one cannot, which is the only way the operator can predict what it will
+do.
 
-**By default** (`ENTRY_SEQUENCE_REQUIRED=false`) an entry needs:
+**By default** (`ENTRY_SEQUENCE_REQUIRED=false`) the standard route needs:
 
 - **live acceptance** — price has travelled far enough beyond the entry,
   and still sits far enough from the risk line, to call the level
@@ -300,6 +340,41 @@ read.
 Each has to survive both wall-clock time and a market-time boundary
 before it counts. Poll frequency is never a substitute for market time.
 
+### The CISD fast lane
+
+The second route, `CISD_FAST_LANE_ENABLED` (default on). It exists because
+of an ordering problem in the standard one: acceptance cannot be satisfied
+until price has already travelled a buffer beyond the entry, so it is a
+late condition by construction — and CISD, which needs only two bars (a
+sweep, and a close that reclaims it), is the earliest signal in the set.
+The early signal therefore ends up waiting on the late one, and the fill
+arrives well past the price the analysis named. That ordering is the
+mechanism behind the fill table above.
+
+The lane substitutes a different proof for the same question. Where
+acceptance argues *price moved, so the level held*, this argues
+*structure broke and price is still standing on the level*:
+
+- **CISD graduated**, and
+- **a strong rejection** printed with it — a strong wick or M5 engulfing,
+  not the soft tier, which is the tier that fades; and
+- **price still inside the entry zone**.
+
+That last condition is what makes the substitution safe rather than merely
+faster. Inside the zone, slippage is bounded by the zone's own width by
+construction, so the fill cannot be a different trade from the planned
+one — and invalidation sits close enough that a wrong read is discovered
+immediately and survived cheaply. Outside the zone neither holds, and the
+lane refuses.
+
+Nothing is removed and no gate is skipped. It is an additional route to
+`enter`; a setup that fails it still has the standard route waiting behind
+it, and every downstream gate still applies — kill zone, spread, news, and
+the R:R floor at the fill. When both routes qualify the standard one is
+what gets recorded, because it is the stronger proof. Which route proved a
+given entry is stored as `entry_lane`, named in the confirmation message,
+and counted per lane in `get_skill_context_audit` under `fill_contract`.
+
 That is the confirmation this monitor shipped with, and the one its
 operator reports as the one that worked: later than the touch, and
 reliably right when it fired.
@@ -310,7 +385,11 @@ each proven on a closed bar that closed after the touch. It is stricter
 and five to fifteen minutes slower. `defence_profile` chooses which
 sequence a given setup must prove.
 
-### The fast lane, and why it is gone
+### The *skill-context* fast lane, and why that one is gone
+
+Not to be confused with the CISD lane above. The difference is where the
+proof comes from: the CISD lane reads live price and asks the market, this
+one took the analysis at its word.
 
 An earlier version let the analysis skill claim it had already read the
 M5 structure shift, and accept an M1 proof in its place.
@@ -523,7 +602,10 @@ a complete confirmation sequence, can ask the broker for a position.
 | `CTRADER_PRICE_SCALE` | `100000` | uniform on this connector; validated at runtime, never trusted blindly |
 | `SCALE_TOLERANCE` | `0.35` | how far a feed price may sit from a registered level before quarantine |
 | `MIN_CONFIRMATION_HOLD_MS` | `60000` | wall-clock hold before evidence graduates |
-| `REQUIRE_NEW_M1_CANDLE` | `true` | evidence must also survive a bar boundary |
+| `IN_ZONE_HOLD_SHORTENING_ENABLED` | `true` | while price is still inside the entry zone the hold drops to `SKILL_CONTEXT_MIN_HOLD_FLOOR_MS`. Away from the level the evidence is all there is to trust, so it pays the full wait; on the level, waiting spends the entry it was protecting and invalidation is close enough to make a wrong read cheap. `false` serves the full hold everywhere |
+| `REQUIRE_NEW_M1_CANDLE` | `true` | evidence must also survive a bar boundary — unaffected by the line above |
+| `CISD_FAST_LANE_ENABLED` | `true` | a second route to entry: CISD graduated **and** a strong rejection **and** price still in the entry zone, without waiting for acceptance. Acceptance cannot be satisfied until price has already travelled, so it makes the earliest signal in the set wait on the latest and the fill lands away from the analysed entry. The in-zone requirement is what makes the substitution safe rather than merely faster — slippage is bounded by the zone's own width. Every downstream gate still applies, the R:R floor included. `false` leaves the standard rule exactly as it was |
+| `CISD_FAST_LANE_REQUIRE_STRONG_PATTERN` | `true` | `false` lets CISD alone take the fast lane. Not recommended: soft is the tier that fades |
 | `ACCEPTANCE_ATR_FRACTION` | `0.5` | acceptance buffer, capped by `ACCEPTANCE_RISK_FRACTION` |
 | `ACCEPTANCE_RISK_FRACTION` | `0.35` | ceiling as a fraction of entry-to-invalidation |
 | `NEWS_FAIL_CLOSED` | `true` | unknown news state blocks new confirmations |
@@ -555,7 +637,7 @@ a complete confirmation sequence, can ask the broker for a position.
 | `ENTRY_DEVIATION_CHECK_ENABLED` | `false` | off by default — a graduated signal has already proven it did not fade, distance from the zone notwithstanding, so capping distance stands down entries for the reason they were safe. The **only** thing that arms the cap: a setup's own `max_entry_deviation` refines it but cannot arm it. `true` requires every setup to stay within the cap |
 | `ENTRY_DEVIATION_ATR_FRACTION` | `0.75` | volatility term of the cap, when it applies |
 | `ENTRY_DEVIATION_RISK_FRACTION` | `0.3` | ceiling as a fraction of entry-to-stop, when it applies |
-| `ENTRY_MIN_REMAINING_RR` | `0.5` | floor on what remains of the R:R **at the fill**. Deliberately below the 1R registration demands — the acceptance requirement moves the fill up to 0.35R past entry by design, so a 1R floor here would contradict it |
+| `ENTRY_MIN_REMAINING_RR` | `1.5` | floor on what remains of the R:R **at the fill** — the fill contract, and the single most consequential number in this table. It was `0.5`, on the reasoning that acceptance moves the fill up to 0.35R past entry by design so a high floor would contradict it. Measured, that reasoning was wrong about the size of the effect: of the monitor's three live confirmations, setups analysed at 5.08R, 2.33R and 2.65R were confirmed at 3.09R, **0.85R** and **1.22R**, and all three were notified as `ENTER NOW` carrying the analysed ratio. Below this floor the entry notification is withheld and `SETUP DEGRADED` is sent instead. Lower it to `1.0` for more entries at a thinner promise; `0.5` restores the old behaviour |
 | `CONFIRMATION_DEADLINE_MINUTES` | `0` (off) | the **only** thing that arms the confirmation deadline. Off by default, because confirmation legitimately arrives later than an analysis guessed; a setup's own `confirmation_deadline_minutes` refines the deadline but cannot arm it. `expiration_minutes` still bounds the setup either way |
 | `TRADE_TRACKING_ENABLED` | `true` | the post-entry TP/SL lifecycle |
 | `TRADE_WATCH_INTERVAL_MS` / `MAX_TRADE_WATCHES` | `10000` / `10` | its cadence and capacity |
@@ -639,6 +721,21 @@ a complete confirmation sequence, can ask the broker for a position.
   outcome, each with its own event id and the setup's correlation id,
   plus the excursion measurements and the measured decision latency.
 - `GET /test-telegram`, `/test-news`.
+
+## Running the analysis from live data
+
+`docs/v13-live-input.md` replaces the screenshot section of a
+screenshot-based analysis prompt and nothing else: which tool serves each
+timeframe role, and the two connector conventions that are silent when
+you get them wrong — only `fromTimestamp`+`toTimestamp` works on
+`get_trendbars`, and its OHLC are raw integers needing ÷100,000 while
+`get_chart_image`'s axis is already real. Plus the rule that keeps the
+two apart: **structure from the picture, every number from the bars.**
+
+It ends by mapping V13's output onto `register_watch` and calling it. The
+Kurthi's own landing zone becomes `entry_zone_low`/`entry_zone_high` —
+that band is what Active validation waits at, and a bare entry price arms
+the monitor on a single number price rarely touches exactly.
 
 ## Charts as pictures
 
