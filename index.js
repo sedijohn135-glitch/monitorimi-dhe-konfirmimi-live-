@@ -93,6 +93,7 @@ import {
   finiteNumber,
   normalizeTimeframe,
   formatLevel,
+  median,
   forwardValidationState,
   fvgCheck,
   killZoneStatus,
@@ -114,6 +115,8 @@ import {
   triggerTaken,
   updateSpreadHealth,
   urgencyHoldMs,
+  proximityHoldMs,
+  priceInEntryZone,
   validateTrapWatchInput,
   validateWatchInput,
   verifyM1Continuation,
@@ -173,6 +176,19 @@ const CONFIG = {
   },
 
   minConfirmationHoldMs: num(process.env.MIN_CONFIRMATION_HOLD_MS, 60000, 0),
+  // The hold drops to `skillContext.holdFloorMs` while price is still in
+  // the entry zone — see proximityHoldMs. On by default: the 60s hold was
+  // written for evidence that has to be trusted at a distance, and inside
+  // the zone it spends the entry it was protecting. The new-bar
+  // requirement below is unaffected either way.
+  inZoneHoldShorteningEnabled: process.env.IN_ZONE_HOLD_SHORTENING_ENABLED !== "false",
+  // §19 The CISD fast lane — see evaluateConfirmation. CISD plus a strong
+  // rejection, with price still in the zone, enters without waiting for
+  // acceptance. On by default because acceptance is the reason
+  // confirmations arrive late and away from the planned entry; the
+  // in-zone requirement is what bounds the slippage it saves.
+  cisdFastLaneEnabled: process.env.CISD_FAST_LANE_ENABLED !== "false",
+  cisdFastLaneRequireStrongPattern: process.env.CISD_FAST_LANE_REQUIRE_STRONG_PATTERN !== "false",
   requireNewBar: process.env.REQUIRE_NEW_M1_CANDLE !== "false",
   acceptanceAtrFraction: num(process.env.ACCEPTANCE_ATR_FRACTION, 0.5, 0.05),
   acceptanceRiskFraction: num(process.env.ACCEPTANCE_RISK_FRACTION, 0.35, 0.05),
@@ -288,7 +304,15 @@ const CONFIG = {
   // boundary that permits the acceptance travel the engine requires and
   // refuses anything worse than it. The deviation cap above is the
   // primary guard against chasing; this one catches a collapsed R:R.
-  entryMinRemainingRR: num(process.env.ENTRY_MIN_REMAINING_RR, 0.5, 0.1),
+  // This is the whole contract in one number. The operator opens a
+  // market order straight from the Telegram message without looking at a
+  // chart, so a confirmation is a promise that the trade he is about to
+  // take is still the trade the analysis described. 0.5 does not hold
+  // that promise: measured over the live confirmations, setups analysed
+  // at 2.33R and 2.65R were confirmed at 0.85R and 1.22R and notified as
+  // though nothing had changed. 1.5 is the floor below which the entry
+  // notification is withheld and SETUP_DEGRADED is sent instead.
+  entryMinRemainingRR: num(process.env.ENTRY_MIN_REMAINING_RR, 1.5, 0.1),
 
   // §20 The confirmation clock. Absent a per-setup deadline the setup's
   // own expiry is the only boundary, exactly as before.
@@ -702,6 +726,63 @@ function resolveWatch(watch, status, extra = {}, message = null, priority = "cri
   }
 }
 
+/**
+ * The fill measurements the entry decision was actually made on, kept on
+ * the resolution record so the audit can compare what was promised with
+ * what was offered instead of re-deriving it from prices afterwards.
+ */
+function fillContract(opportunity) {
+  if (!opportunity) return null;
+  const pick = (v) => (Number.isFinite(v) ? v : null);
+  return {
+    slippage: pick(opportunity.chase),
+    cap: pick(opportunity.cap),
+    cap_enforced: CONFIG.entryDeviationCheckEnabled,
+    risk_planned: pick(opportunity.riskPlanned),
+    risk_actual: pick(opportunity.remainingRisk),
+    rr_planned: pick(opportunity.rrPlanned),
+    rr_actual: pick(opportunity.remainingRR),
+    rr_floor: CONFIG.entryMinRemainingRR,
+  };
+}
+
+/**
+ * "ENTER NOW" is a promise, so the message has to show the arithmetic
+ * behind it. The operator opens a market order from this text without
+ * opening a chart; these three lines are how he can see, in the message
+ * itself, that the trade he is about to take is the trade that was
+ * analysed. A confirmation only ever reaches him once every one of them
+ * is within tolerance — the gates upstream refuse it otherwise — so the
+ * lines exist to be read and trusted, not to be judged.
+ */
+function fillContractLines(c) {
+  if (!c) return "";
+  const lines = [];
+  if (c.slippage !== null) {
+    const capText =
+      c.cap !== null && c.cap_enforced
+        ? ` · cap ${formatLevel(c.cap)}`
+        : c.cap !== null
+          ? ` · cap ${formatLevel(c.cap)} (advisory)`
+          : "";
+    lines.push(`<b>Slippage:</b> ${htmlEscape(formatLevel(c.slippage))}${htmlEscape(capText)}`);
+  }
+  if (c.risk_planned !== null && c.risk_actual !== null) {
+    const pct = c.risk_planned > 0 ? Math.round(((c.risk_actual - c.risk_planned) / c.risk_planned) * 100) : null;
+    lines.push(
+      `<b>Risk:</b> ${htmlEscape(formatLevel(c.risk_actual))} vs ${htmlEscape(formatLevel(c.risk_planned))} planned` +
+        (pct !== null ? ` (${htmlEscape(pct >= 0 ? `+${pct}` : String(pct))}%)` : ""),
+    );
+  }
+  if (c.rr_actual !== null && c.rr_planned !== null) {
+    lines.push(
+      `<b>RR:</b> ${htmlEscape(c.rr_actual.toFixed(2))}R vs ${htmlEscape(c.rr_planned.toFixed(2))}R analysed ` +
+        `(floor ${htmlEscape(String(c.rr_floor))}R)`,
+    );
+  }
+  return lines.length ? `${lines.join("\n")}\n` : "";
+}
+
 function confirmWatch(watch, price, result, gates) {
   return resolveWatch(
     watch,
@@ -711,12 +792,14 @@ function confirmWatch(watch, price, result, gates) {
       signals: result.signals,
       strength: result.strength,
       gates: gates.summary,
+      fill: watch.fillContract ?? null,
     },
     `<b>REAL CONFIRMATION — ENTER NOW</b>\n` +
       `<b>Symbol:</b> ${htmlEscape(watch.symbol)}\n` +
       `<b>Direction:</b> ${htmlEscape(watch.direction.toUpperCase())}\n` +
       `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>Price:</b> ${htmlEscape(formatLevel(price))}\n` +
       `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+      fillContractLines(watch.fillContract) +
       `<b>Evidence:</b> ${htmlEscape(result.signals.join(" + "))}\n` +
       `<b>Strength:</b> ${htmlEscape(result.strength)}\n` +
       `<b>Path:</b> ${htmlEscape(skillPathLine(watch))}\n` +
@@ -731,7 +814,15 @@ function skillPathLine(watch) {
     ? `${profile} defence sequence`
     : "evidence only (post-touch sequence not required)";
   const conviction = watch.skill_context?.conviction;
-  return conviction ? `${sequence} · analyst conviction ${conviction}` : sequence;
+  const lane =
+    watch.entry_lane === "cisd_fast"
+      ? "CISD fast lane (in zone, acceptance not required)"
+      : watch.entry_lane === "standard"
+        ? "standard lane (acceptance + technical)"
+        : null;
+  return [sequence, lane, conviction ? `analyst conviction ${conviction}` : null]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 /**
@@ -789,10 +880,16 @@ function executedWatch(watch, execution) {
   const resolved = resolveWatch(
     watch,
     "EXECUTED",
-    { resolvedPrice: execution.price, execution, signals: watch.lastSignals || [] },
+    {
+      resolvedPrice: execution.price,
+      execution,
+      signals: watch.lastSignals || [],
+      fill: watch.fillContract ?? null,
+    },
     `<b>ENTRY CONFIRMED — ${htmlEscape(direction)}</b>${execution.dryRun ? " <i>(DRY RUN — no order was sent)</i>" : ""}\n` +
       `<b>Reason:</b> ${htmlEscape(evidence)}\n` +
       `<b>Execution:</b> ${htmlEscape(formatLevel(execution.price))} on ${htmlEscape(watch.symbol)}\n` +
+      fillContractLines(watch.fillContract) +
       executionLogLines(watch, execution).join("\n"),
   );
   if (resolved) openTradeFor(watch, execution.price, execution.dryRun ? "dry_run" : "auto_execution");
@@ -887,7 +984,47 @@ function failWatch(watch, price, reason) {
  * There is no chase here by construction — this is a terminal state, and
  * the only way back to this market is a fresh analysis with a new id.
  */
+function setupDegradedWatch(watch, reason, price, detail = {}) {
+  const o = detail.opportunity || {};
+  const rrLine =
+    Number.isFinite(o.rrPlanned) && Number.isFinite(o.remainingRR)
+      ? `<b>RR:</b> ${htmlEscape(o.remainingRR.toFixed(2))}R from here vs ` +
+        `${htmlEscape(o.rrPlanned.toFixed(2))}R analysed ` +
+        `(floor ${htmlEscape(String(CONFIG.entryMinRemainingRR))}R)\n`
+      : "";
+  const riskLine =
+    Number.isFinite(o.remainingRisk) && Number.isFinite(o.riskPlanned)
+      ? `<b>Risk:</b> ${htmlEscape(formatLevel(o.remainingRisk))} from here vs ` +
+        `${htmlEscape(formatLevel(o.riskPlanned))} planned\n`
+      : "";
+  return resolveWatch(
+    watch,
+    "ENTRY_MISSED",
+    { reason, resolvedPrice: price ?? null, ...detail },
+    `<b>SETUP DEGRADED — NO ENTRY</b>\n` +
+      `<b>Symbol:</b> ${htmlEscape(watch.symbol)} (${htmlEscape(watch.direction)})\n` +
+      `<b>Setup ID:</b> ${htmlEscape(watch.setup_id || watch.id)}\n` +
+      `<b>Confirmed at:</b> ${htmlEscape(formatLevel(price))} | ` +
+      `<b>Planned entry:</b> ${htmlEscape(formatLevel(watch.entry))}\n` +
+      riskLine +
+      rrLine +
+      `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+      `<i>The evidence arrived, but this fill is a different trade from the one ` +
+      `that was analysed. Nothing was sent as an entry. Do not open it manually — ` +
+      `re-run the analysis if you still want this market.</i>`,
+    "normal",
+  );
+}
+
 function entryMissedWatch(watch, reason, price, detail = {}) {
+  // A collapsed R:R is not a missed entry and must not read like one. The
+  // entry was not missed: it is available, and taking it would be a worse
+  // trade than the one that was analysed. "Entry missed" there invites
+  // the operator to go looking for the next one; naming the broken ratio
+  // tells him it was the setup that failed, not his timing.
+  if (detail.entryMissedBy === "RR_COLLAPSED" && detail.opportunity) {
+    return setupDegradedWatch(watch, reason, price, detail);
+  }
   return resolveWatch(
     watch,
     "ENTRY_MISSED",
@@ -1797,11 +1934,17 @@ async function tickSetupWatch(watch) {
   // else. It cannot remove a required proof, open a gate, or outrank a
   // hard blocker; it only decides how patient the hold is, down to the
   // same floor every other path is bounded by.
-  const baseHoldMs = urgencyHoldMs(
+  const urgencyHold = urgencyHoldMs(
     watch.urgency,
     CONFIG.minConfirmationHoldMs,
     CONFIG.skillContext.holdFloorMs,
   );
+  // §19 — and shortened to that same floor while price is still standing
+  // in the zone, where waiting costs more than it protects.
+  const inZone = priceInEntryZone(watch, mid, tolerance);
+  const baseHoldMs = CONFIG.inZoneHoldShorteningEnabled
+    ? proximityHoldMs(watch, mid, tolerance, urgencyHold, CONFIG.skillContext.holdFloorMs)
+    : urgencyHold;
 
   // §22/§26 — what this particular setup has to prove, as the analyst
   // declared it, rather than one universal gate applied to every setup.
@@ -1821,9 +1964,15 @@ async function tickSetupWatch(watch) {
     hasBarTime: watch.generation.hasBarTime,
     minHoldMs: baseHoldMs,
     requireNewBar: CONFIG.requireNewBar,
+    cisdFastLane: CONFIG.cisdFastLaneEnabled,
+    cisdFastLaneRequireStrongPattern: CONFIG.cisdFastLaneRequireStrongPattern,
+    inEntryZone: inZone,
   });
   watch.evidence = result.evidence;
   watch.lastSignals = result.signals;
+  // Which proof this entry actually ran on, kept on the watch so the audit
+  // can compare the two lanes rather than infer the path afterwards.
+  watch.entry_lane = result.lane ?? null;
   store.dirty = true;
 
   if (!result.enter || !sequenceReady) {
@@ -1877,6 +2026,11 @@ async function tickSetupWatch(watch) {
     minRemainingRR: CONFIG.entryMinRemainingRR,
     enforceCap: CONFIG.entryDeviationCheckEnabled,
   });
+  // Kept on the watch rather than passed down, so every resolution path
+  // reports the same measurements — the manual confirmation, an automated
+  // execution, and an execution finished after a restart, which reads the
+  // watch back off disk and has no opportunity object to be handed.
+  watch.fillContract = fillContract(opportunity);
   if (!opportunity.actionable) {
     watch.lastReason = "entry_opportunity_closed";
     record(watch, "entry_missed", { reason: opportunity.reason, detail: opportunity.detail, price: mid }, now);
@@ -1909,7 +2063,14 @@ async function tickSetupWatch(watch) {
     record(
       watch,
       "enter_now",
-      { price: mid, profile: defence.profile, latency: watch.latency, macroWindow: macroStatus(now).window },
+      {
+        price: mid,
+        profile: defence.profile,
+        lane: watch.entry_lane,
+        fill: fillContract(opportunity),
+        latency: watch.latency,
+        macroWindow: macroStatus(now).window,
+      },
       now,
     );
     store.dirty = true;
@@ -3403,6 +3564,67 @@ function imageResult(png, meta) {
 }
 
 /**
+ * How well the notifications have kept their promise, measured rather
+ * than asserted.
+ *
+ * The entry notification claims the trade on offer is the trade that was
+ * analysed. This is the record of whether that held: for every
+ * confirmation, the ratio promised against the ratio that survived to the
+ * fill, and which of the two lanes proved it. `degraded` lists the setups
+ * the R:R floor refused, which is the number that says whether the floor
+ * is set anywhere near right — an empty list over many confirmations
+ * means it is too loose, and a list containing setups whose fills were
+ * fine means it is too tight.
+ */
+function fillContractAudit() {
+  const confirmations = [];
+  const degraded = [];
+  for (const record of store.recent()) {
+    const row = {
+      watch_id: record.id,
+      setup_id: record.setup_id || null,
+      symbol: record.symbol,
+      direction: record.direction,
+      resolved_at: record.resolvedAt || null,
+      lane: record.entry_lane || null,
+      ...(record.fill || {}),
+    };
+    if (record.status === "CONFIRMED" || record.status === "EXECUTED") confirmations.push(row);
+    else if (record.entryMissedBy === "RR_COLLAPSED") {
+      degraded.push({
+        ...row,
+        rr_planned: record.opportunity?.rrPlanned ?? null,
+        rr_actual: record.opportunity?.remainingRR ?? null,
+        slippage: record.opportunity?.chase ?? null,
+      });
+    }
+  }
+  const lanes = { standard: 0, cisd_fast: 0, unrecorded: 0 };
+  for (const row of confirmations) {
+    if (row.lane === "standard") lanes.standard += 1;
+    else if (row.lane === "cisd_fast") lanes.cisd_fast += 1;
+    else lanes.unrecorded += 1;
+  }
+  const held = confirmations.filter((row) => Number.isFinite(row.rr_actual));
+  return {
+    configuration: {
+      rr_floor: CONFIG.entryMinRemainingRR,
+      deviation_cap_enforced: CONFIG.entryDeviationCheckEnabled,
+      in_zone_hold_shortening: CONFIG.inZoneHoldShorteningEnabled,
+      cisd_fast_lane: CONFIG.cisdFastLaneEnabled,
+      cisd_fast_lane_requires_strong_pattern: CONFIG.cisdFastLaneRequireStrongPattern,
+    },
+    lanes,
+    median_rr_at_fill: held.length ? median(held.map((row) => row.rr_actual)) : null,
+    median_rr_planned: held.length
+      ? median(held.filter((row) => Number.isFinite(row.rr_planned)).map((row) => row.rr_planned))
+      : null,
+    confirmations,
+    degraded,
+  };
+}
+
+/**
  * Everything a human needs to answer "would this place a trade right
  * now, with what size, through which tool?" — including the three
  * connector conventions that cannot be verified from inside this
@@ -3549,9 +3771,15 @@ function monitorHealth() {
 // sending it.
 
 function confirmationPath() {
-  return CONFIG.entrySequenceRequired
-    ? "rejection → structure shift → displacement, then live evidence"
-    : "live acceptance + a graduated technical signal";
+  if (CONFIG.entrySequenceRequired) {
+    return "rejection → structure shift → displacement, then live evidence";
+  }
+  // The operator predicts the monitor from this line, so it has to name
+  // every route to an entry, not just the older one.
+  const standard = "live acceptance + a graduated technical signal";
+  return CONFIG.cisdFastLaneEnabled
+    ? `${standard}; or CISD + a strong rejection while price is still in the entry zone`
+    : standard;
 }
 
 function skillContextSummary(context) {
@@ -3596,6 +3824,26 @@ async function handleCustomTool(name, args = {}) {
     const { watch, duplicate } = createSetupWatch(args);
     const auto = autoTradeStatus();
     const willTrade = auto.armed && watch.auto_trade !== false;
+    // Registration accepts anything from 1R up; the fill contract refuses
+    // anything under `entryMinRemainingRR` at the fill. A setup analysed
+    // between those two numbers is therefore registrable and can never
+    // confirm — it would sit in the list looking healthy and resolve
+    // SETUP DEGRADED at the end. Say so at registration, when the analyst
+    // can still do something about it, rather than an hour later.
+    const plannedRR = Math.abs(watch.tp1 - watch.entry) / Math.abs(watch.entry - watch.sl);
+    const unreachable = Number.isFinite(plannedRR) && plannedRR < CONFIG.entryMinRemainingRR;
+    if (unreachable && !duplicate) {
+      notify(
+        `<b>SETUP REGISTERED BUT CANNOT CONFIRM</b>\n` +
+          `<b>${htmlEscape(watch.symbol)}</b> — ${htmlEscape(watch.direction.toUpperCase())}\n` +
+          `<b>Analysed at:</b> ${htmlEscape(plannedRR.toFixed(2))}R · ` +
+          `<b>fill floor:</b> ${htmlEscape(String(CONFIG.entryMinRemainingRR))}R\n` +
+          `<i>Even a perfect fill at the planned entry is below the floor, so this ` +
+          `setup can only ever resolve SETUP DEGRADED. Widen TP1, tighten the stop, ` +
+          `or lower ENTRY_MIN_REMAINING_RR.</i>`,
+        { dedupeKey: `${watch.id}:rr_unreachable` },
+      );
+    }
     if (!duplicate) {
       notify(
         `<b>WATCH ACTIVE</b>\n` +
@@ -3627,6 +3875,11 @@ async function handleCustomTool(name, args = {}) {
         reason: willTrade ? null : watch.auto_trade === false ? "auto_trade disabled for this setup" : auto.reason,
       },
       skill_context: skillContextReport(watch),
+      fill_contract: {
+        rr_planned: Number.isFinite(plannedRR) ? Number(plannedRR.toFixed(3)) : null,
+        rr_floor_at_fill: CONFIG.entryMinRemainingRR,
+        can_confirm: !unreachable,
+      },
       message: duplicate
         ? "This setup is already being monitored."
         : `Monitoring started; first check runs immediately and then every ${CONFIG.setupIntervalMs / 1000}s. ` +
@@ -3815,6 +4068,7 @@ async function handleCustomTool(name, args = {}) {
         },
       },
       summary: summariseSkillContextAudits(audits),
+      fill_contract: fillContractAudit(),
       resolved: resolved.map((record) => ({
         watch_id: record.id,
         setup_id: record.setup_id || null,

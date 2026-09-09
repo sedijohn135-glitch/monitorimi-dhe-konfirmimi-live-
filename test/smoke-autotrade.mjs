@@ -261,6 +261,15 @@ const env = {
   // The post-touch sequence is opt-in now. This suite is the one that
   // proves it still works end to end, so it turns it on explicitly.
   ENTRY_SEQUENCE_REQUIRED: "true",
+  // This suite's subject is the execution path — sequence, order shape,
+  // volume conversion, trade lifecycle — and its fixture is a 1.10R setup
+  // (entry 4332, stop 4370, TP1 4290) that fills at 0.97R. That is below
+  // the production fill floor, so at the default the setup resolves
+  // SETUP DEGRADED and no order is ever placed: a correct refusal that
+  // would test nothing here. Pinned to the value the fixture was written
+  // against, so this suite keeps testing execution and the fill contract
+  // is tested where it belongs, in lifecycle.test.mjs (L51–L61).
+  ENTRY_MIN_REMAINING_RR: "0.5",
   BAR_CACHE_MAX_MS: "5000",
   BAR_CACHE_FRACTION: "0.05",
   SPOT_CACHE_MS: "0",
