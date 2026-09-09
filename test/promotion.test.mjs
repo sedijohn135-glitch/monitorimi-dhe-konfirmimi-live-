@@ -298,11 +298,35 @@ test("P21 — an unarmed promotion reports itself as the reason", () => {
   assert.deepEqual(result.failed, ["auto_promote_enabled"]);
 });
 
+
 test("P22 — the kill-zone outlook never reports a negative wait", () => {
   for (let minute = 0; minute < 1440; minute += 7) {
     const outlook = killZoneOutlook(Date.UTC(2026, 0, 5) + minute * 60_000, 10);
     assert.ok(outlook.minutesAway >= 0, `negative wait at minute ${minute}`);
   }
+});
+
+test("P22b — ignoreWeekend lets a 24/7 symbol's trap promote on a weekend", () => {
+  // 2026-01-10 is a Saturday. Pick a UTC instant that lands inside a kill
+  // zone in NY time so the only thing under test is the weekend flag.
+  const saturdayInZone = Date.parse("2026-01-10T14:00:00Z");
+
+  const blocked = killZoneOutlook(saturdayInZone, 10);
+  assert.equal(blocked.active, false, "default: weekend still blocks FX-style promotion");
+  assert.equal(blocked.weekendBlocks, true);
+
+  const allowed = killZoneOutlook(saturdayInZone, 10, { ignoreWeekend: true });
+  assert.equal(allowed.weekend, true, "the calendar fact is unchanged");
+  assert.equal(allowed.weekendBlocks, false, "but it no longer gates activity for this symbol");
+  assert.equal(allowed.active, true);
+
+  // And the gate that actually decides promotion reads weekendBlocks, not
+  // the raw weekend flag, so a BTCUSD trap's kill_zone gate passes too.
+  const gateResult = evaluatePromotionGates(
+    gateInput({ session: allowed, requireKillZone: true }),
+  );
+  const kzGate = gateResult.gates.find((g) => g.name === "kill_zone");
+  assert.equal(kzGate.pass, true, "BTCUSD trap promotion is not refused for being Saturday");
 });
 
 // ---------------------------------------------------------------------------

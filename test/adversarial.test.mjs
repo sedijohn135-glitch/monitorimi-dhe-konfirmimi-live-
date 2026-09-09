@@ -236,6 +236,30 @@ test("13 — the session gate is a pure function of time and is weekend-aware", 
   assert.equal(lunch.active, false);
 });
 
+test("13b — ignoreWeekend lets a 24/7 symbol (BTCUSD) stay active on Sat/Sun", () => {
+  // Same Saturday timestamp as 13, but this time the caller has said the
+  // symbol trades every day — the venue not being closed on a Saturday
+  // is a fact about the symbol, not about the calendar, so the gate must
+  // take it as an input rather than assuming every symbol is FX.
+  const withoutFlag = killZoneStatus(Date.parse("2026-01-10T14:00:00Z"));
+  assert.equal(withoutFlag.active, false, "default behaviour is unchanged for FX/metals");
+  assert.equal(withoutFlag.weekendBlocks, true);
+
+  const btcOnWeekend = killZoneStatus(Date.parse("2026-01-10T14:00:00Z"), { ignoreWeekend: true });
+  // The calendar fact is still reported honestly...
+  assert.equal(btcOnWeekend.weekend, true, "it is still actually a Saturday");
+  // ...but it no longer gates activity.
+  assert.equal(btcOnWeekend.weekendBlocks, false);
+  assert.equal(btcOnWeekend.active, true, "a kill zone at this NY time is otherwise open");
+
+  // NY Lunch still applies to a 24/7 symbol — that carve-out is about
+  // liquidity conditions during the session, not venue closure, and
+  // crypto liquidity thins in the same window too.
+  const btcAtLunch = killZoneStatus(Date.parse("2026-01-07T17:30:00Z"), { ignoreWeekend: true });
+  assert.equal(btcAtLunch.inLunch, true);
+  assert.equal(btcAtLunch.active, false, "ignoreWeekend does not also lift the lunch carve-out");
+});
+
 // ---------------------------------------------------------------------------
 // 14. Watch expires exactly during confirmation.
 // 15. Trap trigger and invalidation land on the same candle.
