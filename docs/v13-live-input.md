@@ -14,6 +14,15 @@ There are no screenshots. A message containing only a symbol — BTCUSD,
 XAUUSD, gold — runs the full V13 pipeline immediately, exactly as seven
 uploaded screenshots would.
 
+THIS BLOCK SUPERSEDES, WHERE THEY CONFLICT:
+  · the TIME RULE block — there is no user_time_v0 tool here, and the
+    feed's own timestamp is the only real clock available, so its
+    instruction never to rely on broker timestamps does not apply.
+  · the section "INPUT — MT5 MOBILE SCREENSHOT".
+  · the note "The user uploads 7 screenshots. He doesn't write anything
+    after uploading them."
+Everything else in V13 stands unchanged and is followed exactly.
+
 CLOCK
   get_spot_prices { symbolId: [id] } → .prices[0].timestamp is epoch ms,
   and it is the live market clock. Convert to New York ET yourself and
