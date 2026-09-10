@@ -115,6 +115,7 @@ import {
   triggerTaken,
   updateSpreadHealth,
   urgencyHoldMs,
+  RR_TARGET_KEYS,
   proximityHoldMs,
   priceInEntryZone,
   validateTrapWatchInput,
@@ -743,6 +744,7 @@ function fillContract(opportunity) {
     rr_planned: pick(opportunity.rrPlanned),
     rr_actual: pick(opportunity.remainingRR),
     rr_floor: CONFIG.entryMinRemainingRR,
+    rr_target: opportunity.rrTarget ?? "TP1",
   };
 }
 
@@ -776,7 +778,7 @@ function fillContractLines(c) {
   }
   if (c.rr_actual !== null && c.rr_planned !== null) {
     lines.push(
-      `<b>RR:</b> ${htmlEscape(c.rr_actual.toFixed(2))}R vs ${htmlEscape(c.rr_planned.toFixed(2))}R analysed ` +
+      `<b>RR to ${htmlEscape(c.rr_target)}:</b> ${htmlEscape(c.rr_actual.toFixed(2))}R vs ${htmlEscape(c.rr_planned.toFixed(2))}R analysed ` +
         `(floor ${htmlEscape(String(c.rr_floor))}R)`,
     );
   }
@@ -988,7 +990,7 @@ function setupDegradedWatch(watch, reason, price, detail = {}) {
   const o = detail.opportunity || {};
   const rrLine =
     Number.isFinite(o.rrPlanned) && Number.isFinite(o.remainingRR)
-      ? `<b>RR:</b> ${htmlEscape(o.remainingRR.toFixed(2))}R from here vs ` +
+      ? `<b>RR to ${htmlEscape(o.rrTarget ?? "TP1")}:</b> ${htmlEscape(o.remainingRR.toFixed(2))}R from here vs ` +
         `${htmlEscape(o.rrPlanned.toFixed(2))}R analysed ` +
         `(floor ${htmlEscape(String(CONFIG.entryMinRemainingRR))}R)\n`
       : "";
@@ -3150,6 +3152,12 @@ const CUSTOM_TOOLS = [
           enum: [...DEFENCE_PROFILES],
           description:
             "Which live proof THIS setup requires after the touch. standard: zone rejection, an M5 structure shift, then displacement — the default, and the right choice when the LTF structure has not already been read. m1_continuation: the same three-step obligation on M1, for a setup whose M5/HTF shift the analysis already established; withdrawn automatically if price moves against the setup. rejection_displacement: rejection then displacement with no structure shift, for a reaction from a declared array. The monitor never picks one for you.",
+        },
+        rr_target: {
+          type: "string",
+          enum: [...RR_TARGET_KEYS],
+          description:
+            "Which target the entry's reward-to-risk is measured against at the fill — the setup's OBJECTIVE, not its first partial. Defaults to tp1. Send tp2 (or tp3) whenever the nearer targets are scale-outs on the way to a Draw On Liquidity, and the DOL is the trade: a setup analysed at 4.6R to its DOL was refused for having decayed to 1.2R against a TP1 the analysis itself labelled 'Low Hanging Fruit', and it then delivered. The target named here must be one the setup actually sends; the floor, the SETUP DEGRADED message and the audit all quote it, so the promised and the live ratio are always measured to the same place.",
         },
         urgency: {
           type: "string",

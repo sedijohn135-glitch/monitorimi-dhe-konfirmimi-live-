@@ -288,6 +288,68 @@ evidence rather than argued about. An empty `degraded` list over many
 confirmations means it is too loose; degraded entries whose fills were
 fine mean it is too tight.
 
+### The floor is measured to the objective, not to the first partial
+
+A floor is only as good as the target it answers to, and TP1 is not always
+the trade. An analysis that names a **Draw On Liquidity** is describing a
+delivery *to the DOL*; the nearer targets are scale-outs on the way, and
+in the v6 template TP1 is literally labelled "Low Hanging Fruit".
+
+Judging such a setup on TP1 answers a question nobody asked. It happened
+live:
+
+| | XAUUSD short, entry 4404.50, stop 4415.50 |
+|---|---|
+| TP1 4384.66 — *Low Hanging Fruit* | 1.80R planned → **1.23R** at the fill |
+| TP2 4354.10 — *DOL Final* | 4.58R planned → **3.43R** at the fill |
+
+The monitor measured TP1, saw 1.23R against a 1.5R floor, and sent
+`SETUP DEGRADED`. Price then ran from 4404 to 4396 — the trade the
+operator was told not to open was delivering while the message sat in his
+phone. Refusing a 3.4R fill is the same failure as notifying a 0.85R one,
+pointed the other way.
+
+`rr_target` fixes it. It names which target the floor answers to —
+`tp1` (the default, so nothing existing changes), `tp2` or `tp3` — and the
+paste path fills it in on its own by matching the declared `DOL:` level
+against the declared targets. Matching is by **level, not by label**: the
+label is prose ("DOL Final / H1 EQL Strong Magnet") and the level is not.
+A DOL that matches no target leaves the default alone rather than guessing.
+
+The promised ratio is then quoted to the same target as the live one —
+4.58R against 3.43R, never 1.80R against 3.43R, which would read as a
+setup that improved. Every message and the audit name the target they
+measured.
+
+The guards that stop this becoming a loophole are the ones already there:
+`RISK_INVERTED` runs first, so a distant DOL cannot make a trade whose
+stop is already breached look generous, and registration refuses an
+`rr_target` naming a target the setup never sent rather than silently
+falling back.
+
+### The entry zone is the band the analysis declared
+
+The same setup declared `PDA: … [4404.00 - 4408.00]` and a trigger that
+fires *inside* that band. The parser had no PDA label, so the zone fell
+back to entry ± tolerance — **0.20 wide** on gold. Nothing lives inside a
+0.20 band for long, which made every in-zone rule the monitor has
+unreachable: the CISD fast lane, the shortened hold. The only confirmation
+route left was the one that waits for price to travel away from the
+entry — and that travel is exactly what the R:R floor then punished.
+
+The PDA band is now read as a zone source, under the same consistency
+check the KURTHI zone already answers to: adopted only when the entry sits
+inside it and the stop sits clear of it, so a band quoted from another leg
+cannot move the entry. The warning that reports it names the block it came
+from, which it previously did not — every source was announced as the
+KURTHI landing zone, including on pastes where the KURTHI zone was the one
+rejected.
+
+`INVALID:` is also read now. The v6 template writes the declared
+invalidation under that spelling, and missing it meant the monitor
+inferred a level past the stop and would have held a setup the analysis
+had already called dead.
+
 ### What the setup can declare about itself
 
 `register_watch` takes the analyst's own rules, not just levels:
@@ -297,6 +359,7 @@ fine mean it is too tight.
 | `entry_zone_low` / `entry_zone_high` | the entry band, e.g. `4330` / `4334`. Touched at the edge price approaches from, never at the midpoint |
 | `potential_trade_sl` (= `sl`) + `thesis_invalidation` (= `invalidation`) | where a trade **would be stopped**, and where the **analysis is wrong**. Send both whenever they differ: a setup that declares only one number has declared a stop, and before entry a stop alone invalidates nothing — it opens the anti-SL branch instead |
 | `defence_profile` | what **this** setup must prove after the touch: `standard`, `m1_continuation` or `rejection_displacement`. The monitor never picks one for you |
+| `rr_target` | which target the R:R floor is measured to at the fill: `tp1` (default), `tp2` or `tp3`. Send the **objective**, not the first partial — a setup whose nearer targets are scale-outs on the way to a DOL is judged on the DOL. The paste path sets it from a declared `DOL:` level. Must name a target the setup actually sends |
 | `urgency` | `LOW`/`NORMAL`/`HIGH`/`CRITICAL`. Scales how long evidence must hold and nothing else — it cannot remove a proof, open a gate, or outrank an invalidation |
 | `max_entry_deviation` | how far past the planned entry is still worth entering. **Ignored unless the operator armed capping** with `ENTRY_DEVIATION_CHECK_ENABLED`; sending it cannot arm it. Where it does apply, never honoured beyond half the entry-to-stop distance |
 | `confirmation_deadline_minutes` | how long confirmation may take **once the zone is touched** — the clock runs from the touch, not from registration. **Ignored unless the operator armed a deadline** with `CONFIRMATION_DEADLINE_MINUTES`; sending it cannot arm one |

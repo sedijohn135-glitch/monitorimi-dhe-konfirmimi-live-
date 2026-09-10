@@ -1093,3 +1093,105 @@ test("L62 — an eroding open trade says so at the top level, not only inside it
   assert.equal(publicWatch({ ...BUY, structureFailure: { count: 2, defensiveExit: false } }).degraded, false);
   assert.equal(publicWatch({ ...BUY }).degraded, false, "a trade with no erosion recorded is not degraded");
 });
+
+// ---------------------------------------------------------------------------
+// §19 The R:R floor is measured to the objective the analysis declared.
+//
+// Reproduces a live refusal. MULTISNIPER07 v6 produced a XAUUSD short whose
+// own template labels TP1 "Low Hanging Fruit" and TP2 "DOL Final", and whose
+// framework requires the DOL to give at least 3:1. The monitor measured the
+// floor against TP1, refused the fill as SETUP DEGRADED, and the trade then
+// delivered — price ran from 4404 to 4396 while the setup sat stood down.
+
+/** The setup exactly as it was registered, and the price it confirmed at. */
+const DOL_SETUP = {
+  symbol: "XAUUSD",
+  direction: "sell",
+  entry: 4404.5,
+  sl: 4415.5,
+  invalidation: 4415.0,
+  tp1: 4384.66, // Low Hanging Fruit / M5 SSL
+  tp2: 4354.1, // DOL Final / H1 EQL — the objective
+  tp3: 4314.12,
+};
+const DOL_FILL = 4401.64;
+
+test("L63 — the fill that was refused is still worth 3.4R to the declared objective", () => {
+  // The arithmetic the refusal turned on. Both numbers are real: judged on
+  // the near target the trade looks finished, judged on the objective it is
+  // barely touched.
+  const toTp1 = evaluateEntryOpportunity(DOL_SETUP, {
+    mid: DOL_FILL,
+    atr: 2,
+    tolerance: 0.1,
+    minRemainingRR: 1.5,
+    enforceCap: false,
+  });
+  assert.equal(Number(toTp1.remainingRR.toFixed(2)), 1.23, "1.23R to the Low Hanging Fruit");
+
+  const toDol = evaluateEntryOpportunity(
+    { ...DOL_SETUP, rr_target: "tp2" },
+    { mid: DOL_FILL, atr: 2, tolerance: 0.1, minRemainingRR: 1.5, enforceCap: false },
+  );
+  assert.equal(Number(toDol.remainingRR.toFixed(2)), 3.43, "3.43R to the DOL");
+});
+
+test("L64 — a setup that declares its objective is judged on it, not on the nearest partial", () => {
+  const verdict = evaluateEntryOpportunity(
+    { ...DOL_SETUP, rr_target: "tp2" },
+    { mid: DOL_FILL, atr: 2, tolerance: 0.1, minRemainingRR: 1.5, enforceCap: false },
+  );
+  assert.equal(verdict.actionable, true, "this trade delivered; refusing it was the defect");
+  assert.equal(verdict.reason, "ACTIONABLE");
+  assert.equal(verdict.rrTarget, "TP2", "the notification must name which target it measured");
+});
+
+test("L65 — declaring nothing still means TP1, so no existing setup changes behaviour", () => {
+  const verdict = evaluateEntryOpportunity(DOL_SETUP, {
+    mid: DOL_FILL,
+    atr: 2,
+    tolerance: 0.1,
+    minRemainingRR: 1.5,
+    enforceCap: false,
+  });
+  assert.equal(verdict.actionable, false);
+  assert.equal(verdict.reason, "RR_COLLAPSED");
+  assert.equal(verdict.rrTarget, "TP1");
+});
+
+test("L66 — the planned ratio is quoted to the same target as the live one", () => {
+  // Comparing 3.43R-to-TP2 against 1.80R-to-TP1 would be arithmetic on two
+  // different trades, and would read as a setup that improved.
+  const verdict = evaluateEntryOpportunity(
+    { ...DOL_SETUP, rr_target: "tp2" },
+    { mid: DOL_FILL, atr: 2, tolerance: 0.1, minRemainingRR: 1.5, enforceCap: false },
+  );
+  assert.equal(Number(verdict.rrPlanned.toFixed(2)), 4.58, "4.58R was the promise to the DOL");
+  assert.ok(verdict.remainingRR < verdict.rrPlanned, "the fill is still worse than the plan");
+});
+
+test("L67 — an objective the setup never sent falls back to TP1 instead of refusing to measure", () => {
+  // Declaring tp2 and then omitting it is an analysis mistake; measuring
+  // nothing at all would turn that mistake into a silent no-entry.
+  const noTp2 = { ...DOL_SETUP, tp2: null, tp3: null, rr_target: "tp2" };
+  const verdict = evaluateEntryOpportunity(noTp2, {
+    mid: DOL_FILL,
+    atr: 2,
+    tolerance: 0.1,
+    minRemainingRR: 1.5,
+    enforceCap: false,
+  });
+  assert.equal(verdict.rrTarget, "TP1");
+  assert.equal(verdict.reason, "RR_COLLAPSED");
+});
+
+test("L68 — the objective cannot rescue a trade whose stop is already breached", () => {
+  // A distant DOL makes the ratio look generous from anywhere. RISK_INVERTED
+  // runs first for exactly that reason.
+  const verdict = evaluateEntryOpportunity(
+    { ...DOL_SETUP, rr_target: "tp2" },
+    { mid: 4416.0, atr: 2, tolerance: 0.1, minRemainingRR: 1.5, enforceCap: false },
+  );
+  assert.equal(verdict.actionable, false);
+  assert.equal(verdict.reason, "RISK_INVERTED");
+});
