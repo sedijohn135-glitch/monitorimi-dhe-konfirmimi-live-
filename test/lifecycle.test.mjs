@@ -32,6 +32,7 @@ import {
   urgencyHoldMs,
   priceInEntryZone,
   proximityHoldMs,
+  entryPlacement,
   validateWatchInput,
 } from "../lib/core.mjs";
 import { WatchStore, publicWatch } from "../lib/store.mjs";
@@ -1194,4 +1195,129 @@ test("L68 — the objective cannot rescue a trade whose stop is already breached
   );
   assert.equal(verdict.actionable, false);
   assert.equal(verdict.reason, "RISK_INVERTED");
+});
+
+// ---------------------------------------------------------------------------
+// §19 Where price is when the evidence completes decides what gets sent.
+//
+// Reproduces the second live failure. Confirmation completed 4.09 below the
+// declared zone and 5.59 below the analysed entry, and the monitor sent
+// ENTER NOW at that price: risk 22.09 against 16.50 planned, +34%. Price
+// then ran to 4376.37 — 93% of the stop, 1.63 from being stopped out. The
+// analyst's own invalidation never fired, so the setup was right the whole
+// time; the entry price was what was wrong.
+
+/** The setup as registered, and the price the evidence completed at. */
+const ZONE_SETUP = {
+  symbol: "XAUUSD",
+  direction: "sell",
+  entry: 4361.5,
+  sl: 4378.0,
+  invalidation: 4376.0,
+  tp1: 4344.0,
+  tp2: 4330.0,
+  tp3: 4314.0,
+  entry_zone_low: 4360.0,
+  entry_zone_high: 4365.0,
+};
+const ZONE_CONFIRM_PRICE = 4355.91;
+
+test("L69 — confirmation below the zone does not become an entry at that price", () => {
+  // The whole defect in one assertion. 4355.91 is not the analysed trade.
+  const placement = entryPlacement(ZONE_SETUP, { mid: ZONE_CONFIRM_PRICE, tolerance: 0.1 });
+  assert.notEqual(placement.action, "ENTER_NOW");
+});
+
+test("L70 — a fill 32% of the way to TP1 is late, and late is not an entry", () => {
+  // The operator's own V14 rule: past 30% toward TP1 the move is spent and
+  // what is left to collect is the retracement.
+  const placement = entryPlacement(ZONE_SETUP, { mid: ZONE_CONFIRM_PRICE, tolerance: 0.1 });
+  assert.equal(placement.action, "SETUP_LATE");
+  assert.equal(Math.round(placement.progressToTp1 * 100), 32);
+});
+
+test("L71 — late is not dead: the setup keeps its watch", () => {
+  // The operator has been burned by both directions. A spent move is a
+  // reason not to enter now, never a reason to call a live setup finished.
+  const placement = entryPlacement(ZONE_SETUP, { mid: ZONE_CONFIRM_PRICE, tolerance: 0.1 });
+  assert.equal(placement.resolves, false);
+});
+
+test("L72 — price back inside the zone is an entry again, whatever it did in between", () => {
+  // Six minutes after the refusal price traded 4362–4367. Lateness is about
+  // where price IS, not where it has been: back at the level is back at the
+  // analysed trade.
+  const placement = entryPlacement(ZONE_SETUP, { mid: 4362.0, tolerance: 0.1 });
+  assert.equal(placement.action, "ENTER_NOW");
+});
+
+test("L73 — outside the zone but not yet late waits for the zone, and says where", () => {
+  // Not a refusal. The setup is valid, this price is not the analysed one,
+  // and the operator is told the price to work a limit at.
+  const placement = entryPlacement(ZONE_SETUP, { mid: 4358.0, tolerance: 0.1 });
+  assert.equal(placement.action, "WAIT_FOR_ZONE");
+  assert.equal(placement.limitPrice, 4361.5, "the analysed entry is the limit price");
+  assert.equal(placement.resolves, false);
+});
+
+test("L74 — drift in the operator's favour is still an entry", () => {
+  // A sell filling ABOVE its zone is a better trade, not a worse one.
+  const placement = entryPlacement(ZONE_SETUP, { mid: 4368.0, tolerance: 0.1 });
+  assert.equal(placement.action, "ENTER_NOW");
+});
+
+test("L75 — switched off, confirmation enters at market exactly as it did", () => {
+  const placement = entryPlacement(ZONE_SETUP, {
+    mid: ZONE_CONFIRM_PRICE,
+    tolerance: 0.1,
+    zoneOnly: false,
+    lateTp1Fraction: 0,
+  });
+  assert.equal(placement.action, "ENTER_NOW");
+});
+
+test("L76 — a setup with no declared zone falls back to tolerance around the entry", () => {
+  // Nothing here may depend on the analyst having filled in a zone field.
+  const noZone = { ...ZONE_SETUP, entry_zone_low: null, entry_zone_high: null };
+  assert.equal(entryPlacement(noZone, { mid: 4361.45, tolerance: 0.1 }).action, "ENTER_NOW");
+  assert.equal(entryPlacement(noZone, { mid: 4358.0, tolerance: 0.1 }).action, "WAIT_FOR_ZONE");
+});
+
+test("L77 — a drift too small to change the trade is still the trade", () => {
+  // The zone edge is not a laser line: spread alone is 0.6 on gold. Drift
+  // is measured from the zone the analyst declared acceptable, and what
+  // decides whether a fill beyond it is still the analysed trade is
+  // whether the ratio has materially moved — drift moves R:R roughly
+  // one-for-one, and the live failure drifted 34% of risk and degraded
+  // 2.88R to 1.90R, also 34%. Under a tenth of risk past the zone, nobody
+  // would re-run the analysis.
+  const nearMiss = entryPlacement(ZONE_SETUP, { mid: 4359.4, tolerance: 0.1 });
+  assert.equal(nearMiss.action, "ENTER_NOW", "0.60 past a 5.0 zone, grace 1.65 on 16.50 risk");
+
+  // And the failure this all comes from stays refused: 5.59 on 16.50 risk.
+  const realFailure = entryPlacement(ZONE_SETUP, { mid: ZONE_CONFIRM_PRICE, tolerance: 0.1 });
+  assert.equal(realFailure.action, "SETUP_LATE");
+});
+
+test("L78 — the grace scales with the setup, not with the instrument", () => {
+  // A wide-stop setup tolerates more absolute drift than a tight one,
+  // because the same absolute drift costs it less of its ratio.
+  const wide = { ...ZONE_SETUP, sl: 4411.5, tp1: 4300.0 }; // risk 50
+  assert.equal(entryPlacement(wide, { mid: 4357.0, tolerance: 0.1 }).action, "ENTER_NOW");
+  const tight = { ...ZONE_SETUP, sl: 4366.5, tp1: 4344.0 }; // risk 5
+  assert.notEqual(entryPlacement(tight, { mid: 4357.0, tolerance: 0.1 }).action, "ENTER_NOW");
+});
+
+test("L79 — drift in the operator's favour still has to leave the trade its room", () => {
+  // Selling higher than planned is a better price only while the stop is
+  // still a stop. At 4376.37 the fill is 14.87 better and the remaining
+  // room is 1.63 — a tenth of the 16.50 the setup was designed to risk,
+  // and inside the analyst's own invalidation. That is not the analysed
+  // trade with a discount, it is a different trade that noise closes.
+  assert.equal(entryPlacement(ZONE_SETUP, { mid: 4368.0, tolerance: 0.1 }).action, "ENTER_NOW",
+    "10.00 of room left on 16.50 planned — still the trade");
+  assert.equal(entryPlacement(ZONE_SETUP, { mid: 4373.47, tolerance: 0.1 }).action, "WAIT_FOR_ZONE",
+    "4.53 of room left — wait for price to come back to the zone");
+  assert.equal(entryPlacement(ZONE_SETUP, { mid: 4376.37, tolerance: 0.1 }).action, "WAIT_FOR_ZONE",
+    "1.63 of room left, at the invalidation — never an entry");
 });

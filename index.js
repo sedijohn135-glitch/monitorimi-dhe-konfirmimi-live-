@@ -118,6 +118,7 @@ import {
   RR_TARGET_KEYS,
   proximityHoldMs,
   priceInEntryZone,
+  entryPlacement,
   validateTrapWatchInput,
   validateWatchInput,
   verifyM1Continuation,
@@ -183,6 +184,16 @@ const CONFIG = {
   // the zone it spends the entry it was protecting. The new-bar
   // requirement below is unaffected either way.
   inZoneHoldShorteningEnabled: process.env.IN_ZONE_HOLD_SHORTENING_ENABLED !== "false",
+  // §19 Where the entry may be taken — see docs/confirmation-rules.md.
+  // On by default: confirmation validates the setup, and taking it at
+  // whatever price the evidence happened to complete at is what entered a
+  // live short 5.59 below its analysed entry on 34% more risk, minutes
+  // before price came within 1.63 of the stop. `false` restores entry at
+  // market wherever confirmation lands.
+  entryZoneOnly: process.env.ENTRY_ZONE_ONLY !== "false",
+  // How much of the distance to TP1 price may already have travelled
+  // before the entry counts as late. The operator's own V14 rule. 0 off.
+  entryLateTp1Fraction: num(process.env.ENTRY_LATE_TP1_FRACTION, 0.3, 0),
   // §19 The CISD fast lane — see evaluateConfirmation. CISD plus a strong
   // rejection, with price still in the zone, enters without waiting for
   // acceptance. On by default because acceptance is the reason
@@ -986,6 +997,43 @@ function failWatch(watch, price, reason) {
  * There is no chase here by construction — this is a terminal state, and
  * the only way back to this market is a fresh analysis with a new id.
  */
+/**
+ * §19 — the message for a setup that is confirmed but not at this price.
+ *
+ * Deliberately not shaped like an entry and deliberately not shaped like a
+ * refusal. The operator acts on these without opening a chart, so the one
+ * thing it has to make unmistakable is that nothing is being asked of him
+ * at market right now, and the setup is still his.
+ */
+function placementMessage(watch, placement, price) {
+  const side = watch.direction.toUpperCase();
+  const zone =
+    watch.entry_zone_low !== null && watch.entry_zone_high !== null
+      ? `${formatLevel(watch.entry_zone_low)}–${formatLevel(watch.entry_zone_high)}`
+      : formatLevel(watch.entry);
+  const head =
+    placement.action === "SETUP_LATE"
+      ? `<b>SETUP LATE — DO NOT CHASE</b>\n`
+      : `<b>CONFIRMED — WAIT FOR THE ZONE</b>\n`;
+  const body =
+    placement.action === "SETUP_LATE"
+      ? `<i>The evidence is complete and the setup is still valid, but price has ` +
+        `already delivered ${htmlEscape(Math.round((placement.progressToTp1 ?? 0) * 100))}% of the way to TP1 ` +
+        `without you. Entering here buys the retracement. The watch is still running — ` +
+        `if price comes back to the zone you will be told to enter.</i>`
+      : `<i>The setup is confirmed. This price is not the one that was analysed, so ` +
+        `nothing is being asked of you at market. Work a limit at ` +
+        `${htmlEscape(formatLevel(placement.limitPrice))} — the watch is still running.</i>`;
+  return (
+    head +
+    `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(side)}\n` +
+    `<b>Setup ID:</b> ${htmlEscape(watch.setup_id || watch.id)}\n` +
+    `<b>Price now:</b> ${htmlEscape(formatLevel(price))} | <b>Analysed entry:</b> ${htmlEscape(formatLevel(watch.entry))} (zone ${htmlEscape(zone)})\n` +
+    `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+    body
+  );
+}
+
 function setupDegradedWatch(watch, reason, price, detail = {}) {
   const o = detail.opportunity || {};
   const rrLine =
@@ -2044,6 +2092,35 @@ async function tickSetupWatch(watch) {
     );
     return;
   }
+
+  // §19 — the evidence is complete and the ratio still holds, so the SETUP
+  // is confirmed. Where price sits right now decides whether that means
+  // "take it" or "not at this price". Neither of the withholding answers
+  // resolves the watch: a spent move is a reason not to enter now, never a
+  // reason to call a live setup finished.
+  const placement = entryPlacement(watch, {
+    mid,
+    tolerance,
+    lateTp1Fraction: CONFIG.entryLateTp1Fraction,
+    zoneOnly: CONFIG.entryZoneOnly,
+  });
+  watch.placement = placement.action;
+  if (placement.action !== "ENTER_NOW") {
+    watch.lastReason = placement.action === "SETUP_LATE" ? "entry_late" : "awaiting_zone";
+    // Said once per state, not once per tick: the watch keeps running and
+    // this branch is reached on every poll until price comes back.
+    if (watch.placementNotified !== placement.action) {
+      watch.placementNotified = placement.action;
+      store.dirty = true;
+      record(watch, "entry_withheld", { action: placement.action, price: mid, progressToTp1: placement.progressToTp1 }, now);
+      notify(placementMessage(watch, placement, mid), {
+        dedupeKey: `${watch.id}:${placement.action}`,
+        priority: "normal",
+      });
+    }
+    return;
+  }
+  watch.placementNotified = null;
 
   const gates = await applyExternalGates(watch, spread);
   if (gates.pass) {
