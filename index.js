@@ -139,6 +139,13 @@ import { renderCandles, demoBars } from "./lib/chart-image.mjs";
 import { Notifier } from "./lib/notify.mjs";
 import { WatchStore, publicWatch } from "./lib/store.mjs";
 import { parseSetupText } from "./lib/parse-setup.mjs";
+import {
+  applyEntryModel,
+  entryModelByNumber,
+  evaluateModelGate,
+  timeStopBarsFor,
+} from "./lib/entry-models.mjs";
+import { evaluateKillSwitches, validateKillSwitchInput } from "./lib/kill-switch.mjs";
 
 // ---------------------------------------------------------------------------
 // §1 Configuration
@@ -350,6 +357,22 @@ const CONFIG = {
   tradeTrackingEnabled: process.env.TRADE_TRACKING_ENABLED !== "false",
   tradeIntervalMs: num(process.env.TRADE_WATCH_INTERVAL_MS, 10000, 3000),
   maxTradeWatches: num(process.env.MAX_TRADE_WATCHES, 10, 1),
+
+  // §37 The entry-model catalogue and the four v6.0 kill switches.
+  //
+  // Both are off by a single switch each, and both are inert without the
+  // analysis declaring something: an unrecognised model name gets no
+  // policy, and a kill switch nobody armed with a level never fires.
+  entryModelGateEnabled: process.env.ENTRY_MODEL_GATE_ENABLED !== "false",
+  killSwitchesEnabled: process.env.KILL_SWITCHES_ENABLED !== "false",
+  timeStopEnabled: process.env.TIME_STOP_ENABLED !== "false",
+  // How far toward TP1 the trade must have been offered, at its best,
+  // before the Time Stop stops calling it a Time Distortion.
+  timeStopMinProgress: num(process.env.TIME_STOP_MIN_PROGRESS, 0.5, 0.05),
+  // TP1 moves the stop to the entry. The monitor holds no broker order
+  // for a manual position, so this changes the level the monitor watches
+  // and tells the operator to move his own — it cannot move it for him.
+  breakEvenOnTp1: process.env.BREAK_EVEN_ON_TP1 !== "false",
 
   autoTrade: autoTradeConfig(),
   promotion: promotionConfig(),
@@ -796,6 +819,31 @@ function fillContractLines(c) {
   return lines.length ? `${lines.join("\n")}\n` : "";
 }
 
+/**
+ * LONG/SHORT rather than buy/sell: the operator reads these messages at
+ * speed on a phone, and the whole catalogue speaks in those terms.
+ */
+function directionLabel(watch) {
+  return watch.direction === "buy" ? "LONG" : "SHORT";
+}
+
+/**
+ * The model behind an entry, and what it says has to hold for the trade
+ * to stay alive. It is on the entry message because that is the moment
+ * the operator commits: knowing this is a Silver Bullet whose window
+ * shuts at 11:00, or a Breaker entry that dies on a close through the
+ * Breaker, changes what he does over the next hour.
+ */
+function modelLines(watch) {
+  const model = watch.entry_model;
+  if (!model) return "";
+  return (
+    `<b>Modeli:</b> ${htmlEscape(String(model.number))} · ${htmlEscape(model.name)}\n` +
+    `<b>Validimi:</b> ${htmlEscape(model.validation)}\n` +
+    `<b>Invalidimi:</b> ${htmlEscape(model.invalidation)}\n`
+  );
+}
+
 function confirmWatch(watch, price, result, gates) {
   return resolveWatch(
     watch,
@@ -807,9 +855,10 @@ function confirmWatch(watch, price, result, gates) {
       gates: gates.summary,
       fill: watch.fillContract ?? null,
     },
-    `<b>REAL CONFIRMATION — ENTER NOW</b>\n` +
+    `<b>🚨 HYR TANI — REAL CONFIRMATION</b>\n` +
       `<b>Symbol:</b> ${htmlEscape(watch.symbol)}\n` +
-      `<b>Direction:</b> ${htmlEscape(watch.direction.toUpperCase())}\n` +
+      `<b>Direction:</b> ${htmlEscape(directionLabel(watch))}\n` +
+      modelLines(watch) +
       `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>Price:</b> ${htmlEscape(formatLevel(price))}\n` +
       `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
       fillContractLines(watch.fillContract) +
@@ -925,9 +974,10 @@ function confirmedNotExecutedWatch(watch, price, result, gates, refusal) {
       gates: gates.summary,
       execution: { submitted: false, refused: refusal.failures, reason: refusal.reason },
     },
-    `<b>REAL CONFIRMATION — ENTER MANUALLY</b>\n` +
+    `<b>🚨 HYR TANI — ENTER MANUALLY</b>\n` +
       `<b>Symbol:</b> ${htmlEscape(watch.symbol)}\n` +
-      `<b>Direction:</b> ${htmlEscape(watch.direction.toUpperCase())}\n` +
+      `<b>Direction:</b> ${htmlEscape(directionLabel(watch))}\n` +
+      modelLines(watch) +
       `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>Price:</b> ${htmlEscape(formatLevel(price))}\n` +
       `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
       `<b>Evidence:</b> ${htmlEscape(result.signals.join(" + "))}\n` +
@@ -1309,11 +1359,51 @@ async function applyExternalGates(watch, spread) {
   }
   const news = await newsStatusForWatch(watch);
   if (news.blocked) reasons.push(`News: ${news.reason}`);
+  // §37 — the model's own window and weekday, checked at the only moment
+  // they decide anything. A Silver Bullet whose hour has not arrived is
+  // waiting, not failing, so this withholds the entry exactly the way the
+  // kill-zone gate above does and the watch keeps running.
+  const model = modelGateFor(watch);
+  for (const blocker of model.blockers) reasons.push(blocker.detail);
   return {
     pass: reasons.length === 0,
     reasons,
     zone: session.zone,
-    summary: { kill_zone: session, spread, news },
+    summary: { kill_zone: session, spread, news, entry_model: modelGateSummary(watch, model) },
+  };
+}
+
+/** The model gate for a watch, or an open gate when it declared no model. */
+function modelGateFor(watch, nowMs = Date.now()) {
+  if (!CONFIG.entryModelGateEnabled || !watch.entry_model) {
+    return { pass: true, expired: false, blockers: [], notes: [], window: { state: "NONE", window: null } };
+  }
+  return evaluateModelGate(entryModelByNumber(watch.entry_model.number), {
+    nowMs,
+    direction: watch.direction,
+  });
+}
+
+function modelGateSummary(watch, gate) {
+  if (!watch.entry_model) return null;
+  return {
+    number: watch.entry_model.number,
+    name: watch.entry_model.name,
+    pass: gate.pass,
+    window_state: gate.window?.state ?? "NONE",
+    blockers: gate.blockers.map((blocker) => blocker.code),
+    notes: gate.notes,
+  };
+}
+
+/** Which of the four switches this setup actually armed, for the record. */
+function killSwitchArming(watch) {
+  return {
+    breaker_level: watch.breaker_level ?? null,
+    htf_pda_level: watch.htf_pda_level ?? null,
+    htf_weekly_confirmed: watch.htf_weekly_confirmed === true,
+    pda_arrays: watch.pda_arrays ?? null,
+    time_stop_bars: watch.time_stop_bars ?? watch.entry_model?.time_stop_bars ?? null,
   };
 }
 
@@ -1401,6 +1491,24 @@ async function tickSetupWatch(watch) {
   if (watch.expiresAt && now >= watch.expiresAt) {
     watch.lastReason = "expired";
     expireWatch(watch, "Watch expiration reached");
+    return;
+  }
+
+  // §37 — the three Silver Bullets declare the close of their own window
+  // as an invalidation, not as a wait. Checked here, with expiry, because
+  // a window that has closed cannot reopen today and every tick after it
+  // would otherwise be spent looking for an entry the model has already
+  // ruled out. Only before entry: once the setup has confirmed, the trade
+  // it produced is judged on its stop and targets, not on the clock.
+  const modelGate = modelGateFor(watch, now);
+  if (modelGate.expired) {
+    watch.lastReason = "model_window_closed";
+    record(watch, "model_window_closed", { model: watch.entry_model?.number, window: modelGate.window?.window }, now);
+    expireWatch(
+      watch,
+      `${modelGate.blockers[0]?.detail || "Dritarja e modelit u mbyll"} — ` +
+        `sipas modelit vetë kjo është invalidim, jo pritje`,
+    );
     return;
   }
 
@@ -2226,6 +2334,19 @@ function openTradeFor(watch, price, source) {
     tp3: watch.tp3 ?? null,
     source,
     targetsHit: [],
+    // §37 — the model and the levels that arm the kill switches travel
+    // with the trade. The setup record is finished at ENTER NOW and the
+    // switches are a post-entry rule, so reading them off the setup later
+    // would mean reading a record that is no longer being maintained.
+    entry_model: watch.entry_model ?? null,
+    breaker_level: watch.breaker_level ?? null,
+    htf_pda_level: watch.htf_pda_level ?? null,
+    htf_weekly_confirmed: watch.htf_weekly_confirmed === true,
+    pda_arrays: watch.pda_arrays ?? null,
+    time_stop_bars: watch.time_stop_bars ?? null,
+    killSwitchState: { arrays: null, fired: [] },
+    plannedSl: watch.sl,
+    breakEvenAt: null,
     lifecycle: "ACTIVE_TRADE",
     openedAt: new Date(now).toISOString(),
     openedAtMs: now,
@@ -2244,6 +2365,60 @@ function openTradeFor(watch, price, source) {
   // thing that will keep watching a real position across a restart.
   scheduleSave(true);
   return trade;
+}
+
+/**
+ * The four kill switches on an open trade. Each fires at most once — a
+ * rule that shouts on every poll is a rule the operator learns to
+ * ignore, which is the one failure mode a kill switch cannot afford.
+ */
+async function runKillSwitches(trade, bars, symbolId, now) {
+  // Daily candles are only fetched when a Daily PDA was actually
+  // declared: no armed switch, no upstream call.
+  let dailyBars = null;
+  if (finiteNumber(trade.htf_pda_level) !== null) {
+    const raw = await market.bars(trade.symbol, symbolId, "D1", 10);
+    const series = closedSeries(raw || [], "D1", { nowMs: now });
+    dailyBars = series.status === "OK" ? series.bars : null;
+  }
+
+  const outcome = evaluateKillSwitches(trade, {
+    bars,
+    dailyBars,
+    arraysState: trade.killSwitchState?.arrays ?? null,
+    barsAllowed: timeStopBarsFor(entryModelByNumber(trade.entry_model?.number), {
+      killZoneActive: killZoneStatus(now).active,
+      override: trade.time_stop_bars,
+    }),
+    minProgress: CONFIG.timeStopMinProgress,
+    timeStopEnabled: CONFIG.timeStopEnabled,
+    nowMs: now,
+  });
+
+  const alreadyFired = new Set(trade.killSwitchState?.fired ?? []);
+  const fresh = outcome.fired.filter((result) => !alreadyFired.has(result.code));
+  trade.killSwitchState = {
+    arrays: outcome.arraysState,
+    fired: [...alreadyFired, ...fresh.map((result) => result.code)],
+  };
+  if (!fresh.length) return;
+  store.dirty = true;
+
+  for (const result of fresh) {
+    record(trade, "kill_switch", { code: result.code, reason: result.reason, detail: result.detail }, now);
+    notify(
+      `<b>⛔ KILL SWITCH — MBYLLE TRADE</b>\n` +
+        `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(directionLabel(trade))}\n` +
+        `<b>Setup ID:</b> ${htmlEscape(trade.setup_id || trade.parentWatchId)}\n` +
+        `<b>Rregulli:</b> ${htmlEscape(result.code)}\n` +
+        `<b>Arsyeja:</b> ${htmlEscape(result.reason)}\n` +
+        `<b>Entry:</b> ${htmlEscape(formatLevel(trade.entry))} | ` +
+        `<b>SL:</b> ${htmlEscape(formatLevel(trade.sl))}\n` +
+        `<i>Mbylle pozicionin manualisht te brokeri. Monitori nuk ka urdhër mbyllës — ` +
+        `vazhdon ta ndjekë trade-in dhe do të raportojë SL/TP nëse e mban hapur.</i>`,
+      { dedupeKey: `${trade.id}:kill:${result.code}`, priority: "critical" },
+    );
+  }
 }
 
 async function tickTradeWatch(trade) {
@@ -2290,12 +2465,21 @@ async function tickTradeWatch(trade) {
       trade,
       "TRADE_STOPPED",
       { resolvedPrice: safety.price, reason: safety.reason, targetsHit: trade.targetsHit },
-      `<b>TRADE STOPPED</b>\n` +
-        `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(trade.direction.toUpperCase())}\n` +
+      (trade.breakEvenAt
+        ? `<b>❌ BREAK-EVEN STOP — TRADE MBYLLUR</b>\n`
+        : `<b>❌ SL HIT — TRADE STOPPED</b>\n`) +
+        `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(directionLabel(trade))}\n` +
         `<b>Setup ID:</b> ${htmlEscape(trade.setup_id || trade.parentWatchId)}\n` +
         `<b>Entry:</b> ${htmlEscape(formatLevel(trade.entry))} | ` +
         `<b>Stop:</b> ${htmlEscape(formatLevel(trade.sl))}\n` +
         `<b>Targets reached first:</b> ${htmlEscape(trade.targetsHit.join(", ") || "none")}\n` +
+        // A stop that was moved to entry after TP1 is not the loss the
+        // planned stop would have been, and reporting the two the same
+        // way would misprice the day for whoever reads the alerts back.
+        (trade.breakEvenAt
+          ? `<i>Stop-i ishte lëvizur te Entry pas TP1, ndaj kjo nuk është humbja e planifikuar ` +
+            `(SL fillestar ${htmlEscape(formatLevel(trade.plannedSl))}).</i>\n`
+          : "") +
         `<i>This trade is closed and is not monitored further. It is not revived if ` +
         `price returns.</i>`,
     );
@@ -2339,6 +2523,14 @@ async function tickTradeWatch(trade) {
     }
   }
 
+  // §37 — the four v6.0 kill switches. Each is armed only by a level the
+  // analysis declared, and each ends in a message rather than an order:
+  // there is no closing order behind a manual position, so the operator
+  // is told, loudly and once, and the trade stays tracked.
+  if (CONFIG.killSwitchesEnabled && structureSeries.status === "OK") {
+    await runKillSwitches(trade, structureSeries.bars, symbolId, now);
+  }
+
   const progress = evaluateTradeProgress(trade, { mid, protective, nowMs: now });
   if (progress.action !== "TARGET" && progress.action !== "TARGET_FINAL") {
     trade.lastReason = "in_trade";
@@ -2347,12 +2539,30 @@ async function tickTradeWatch(trade) {
   for (const target of progress.reached) {
     trade.targetsHit = [...(trade.targetsHit || []), target.name];
     record(trade, target.name.toLowerCase(), { level: target.level, price: progress.price }, now);
+    // TP1 moves the stop to entry. The monitor holds no broker order for a
+    // manual position, so it moves the level it watches and tells the
+    // operator to move his — the two must not be reported as one.
+    const breakEven =
+      target.name === "TP1" && CONFIG.breakEvenOnTp1 && !trade.breakEvenAt && trade.sl !== trade.entry;
+    if (breakEven) {
+      trade.plannedSl = trade.sl;
+      trade.sl = trade.entry;
+      trade.breakEvenAt = new Date(now).toISOString();
+      record(trade, "break_even", { from: trade.plannedSl, to: trade.sl }, now);
+    }
     notify(
-      `<b>${htmlEscape(target.name)} REACHED</b>\n` +
-        `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(trade.direction.toUpperCase())}\n` +
+      (target.name === "TP1"
+        ? `<b>✅ TP1 ARDHI!</b>\n`
+        : `<b>🎯 ${htmlEscape(target.name)} ARDHI — target institucional</b>\n`) +
+        `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(directionLabel(trade))}\n` +
         `<b>Level:</b> ${htmlEscape(formatLevel(target.level))} | ` +
         `<b>Price:</b> ${htmlEscape(formatLevel(progress.price))}\n` +
-        `<b>Setup ID:</b> ${htmlEscape(trade.setup_id || trade.parentWatchId)}`,
+        `<b>Setup ID:</b> ${htmlEscape(trade.setup_id || trade.parentWatchId)}` +
+        (breakEven
+          ? `\n<b>➔ LËVIZ STOP LOSS-IN TE ENTRY (${htmlEscape(formatLevel(trade.entry))}) TANI — BREAK-EVEN.</b>\n` +
+            `<i>Monitori tashmë e ndjek stop-in te Entry. Lëvize edhe te brokeri yt — ` +
+            `monitori nuk ka urdhër te brokeri për ta lëvizur vetë.</i>`
+          : ""),
       { dedupeKey: `${trade.id}:${target.name}` },
     );
   }
@@ -3256,7 +3466,36 @@ const CUSTOM_TOOLS = [
           type: "number",
           description: "How long the entry zone is worth watching for a touch at all.",
         },
-        setup_model: { type: "string" },
+        setup_model: {
+          type: "string",
+          description:
+            "Which of the 22 v6.0 entry models this setup is. Recognised by number (\"Modeli 7\"), by name (\"Silver Bullet (10-11 AM)\") or by key (\"SILVER_BULLET_AM\"); an unrecognised name is kept as a label and applies no policy. A recognised model supplies the defaults this setup did not declare (defence_profile, invalidation_rule), gates its own session window and weekday, and can refuse the registration outright: Model 16 (High Resistance Conditions) is a PASS filter, and Model 2 (Market Anchor) is LONG only.",
+        },
+        breaker_level: {
+          type: "number",
+          description:
+            "The Breaker Block holding this trade up — below entry for a buy, above for a sell. Arms the Breaker Precedence kill switch: a body close through it against the position ends the trade (§06.C). Omit it and that switch never fires; nothing is inferred.",
+        },
+        htf_pda_level: {
+          type: "number",
+          description:
+            "The Daily PDA the thesis rests on, on the protective side of entry. Arms the HTF Cascade kill switch. A break with htf_weekly_confirmed set is reported as a cascade and changes nothing (Iron Rule 14: follow the cascade, do not flip the bias); a break without it ends the trade.",
+        },
+        htf_weekly_confirmed: {
+          type: "boolean",
+          description: "A Weekly PDA stands behind the Daily one, so a Daily break cascades rather than kills.",
+        },
+        pda_arrays: {
+          type: "array",
+          items: { type: "number" },
+          description:
+            "Opposing PDA arrays between entry and stop, at most 8. Arms Iron Rule 12: three of them closed through against the position is an emergency exit. Every level must lie strictly between entry and sl — one that does not is refused rather than dropped.",
+        },
+        time_stop_bars: {
+          type: "number",
+          description:
+            "How many closed M5 candles this setup gets to start working before the Time Stop calls it a Time Distortion. Defaults to the model's own number; outside a kill zone the allowance is halved.",
+        },
         conviction: { type: "string" },
         session: { type: "string" },
         season: { type: "string" },
@@ -3488,7 +3727,20 @@ function filterToMarketData(tools) {
 }
 
 function createSetupWatch(args) {
-  const input = validateWatchInput(args);
+  const validated = validateWatchInput(args);
+  // §37 — the catalogue is applied after validation, never inside it, so
+  // the dependency runs one way. Both calls can refuse the registration:
+  // Model 16 is a filter whose whole content is "do not take this", and
+  // a kill-switch level on the wrong side of the entry would arm a rule
+  // that then measures something other than what it claims to.
+  const input = {
+    ...(CONFIG.entryModelGateEnabled ? applyEntryModel(validated, args) : { ...validated, entry_model: null }),
+    ...validateKillSwitchInput(args, {
+      direction: validated.direction,
+      entry: validated.entry,
+      sl: validated.sl,
+    }),
+  };
   const dedupeKey = watchKey(input);
   const existing = store.findByDedupeKey("SETUP", dedupeKey);
   if (existing) return { watch: existing, duplicate: true };
@@ -3550,6 +3802,10 @@ function createSetupWatch(args) {
       thesis_invalidation_declared: watch.thesis_invalidation_declared,
       targets: [watch.tp1, watch.tp2, watch.tp3].filter((value) => value !== null),
       defence_profile: watch.defence_profile,
+      entry_model: watch.entry_model
+        ? { number: watch.entry_model.number, name: watch.entry_model.name, matched_by: watch.entry_model_matched_by }
+        : null,
+      kill_switches: killSwitchArming(watch),
       urgency: watch.urgency,
       max_entry_deviation: watch.max_entry_deviation,
       confirmation_deadline_minutes: watch.confirmation_deadline_minutes,

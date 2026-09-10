@@ -19,6 +19,11 @@ The optimisation target is **the earliest defensible entry** — not the
 earliest possible one, and not the most confirmed one. Every rule below
 exists to move one of those two failure modes out of the way.
 
+> **Which model a setup is now changes what the monitor does.** The 22
+> v6.0 entry models, the session windows they gate on, and the four kill
+> switches that end a trade before its stop are in
+> [`entry-models.md`](entry-models.md).
+
 ## The four questions
 
 These are four different questions and the monitor answers them
