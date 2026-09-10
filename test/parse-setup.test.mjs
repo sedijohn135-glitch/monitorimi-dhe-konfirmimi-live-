@@ -368,7 +368,13 @@ STOP LOSS : 80012.00
 TP1 : 79631.00`);
   assert.equal(parsed.entry_zone_low, 79935);
   assert.equal(parsed.entry_zone_high, 80011);
-  assert.ok(warnings.some((w) => /KURTHI landing zone/.test(w)));
+  // And the warning names the block it was actually taken from. This used
+  // to read "KURTHI landing zone" for every source, which on this very
+  // paste named the one zone that was rejected.
+  assert.ok(
+    warnings.some((w) => /sniper zone/i.test(w) && /79935/.test(w)),
+    `expected the Fibo sniper zone to be named, got: ${warnings.join(" | ")}`,
+  );
   assert.doesNotThrow(() => validateWatchInput(parsed));
 });
 
@@ -385,4 +391,89 @@ TP1 : 79631.00`);
   assert.ok(note, "the refusal is reported");
   assert.ok(/80000/.test(note) && /80011/.test(note), "both candidates are named");
   assert.doesNotThrow(() => validateWatchInput(parsed));
+});
+
+// ---------------------------------------------------------------------------
+// The v6 output block, verbatim from the paste that produced the live
+// refusal. It declares its objective twice — once as a DOL level in the
+// trap block, once as the label on TP2 — and declares the PDA band the
+// trigger fires inside. The monitor read neither.
+
+const V6_PASTE = `
+🪤 TRAP INTELLIGENCE
+Kurthi: Type 1 (EQH/Swing High Breakout Trap) BEARISH
+Trap Score: 9/9 | Manipulation: COMPLETE
+DOL: 4354.10 (H1 EQL) | Lock: LOCKED
+
+🎯 ZERO FLOAT ENTRY
+INSTRUMENT: XAUUSD
+DREJTIMI: 📉 SHORT
+PDA: Bearish FVG / OB (M1/M5) [4404.00 - 4408.00] · Rank 1st
+
+🟢 ENTRY: 4404.50 — M1/M5 Bearish FVG CE
+🔴 SL: 4415.50 — [Anchor i swing high + spread buffer]
+🎯 TP1: 4384.66 — [Low Hanging Fruit / M5 SSL]
+🎯 TP2: 4354.10 — [DOL Final / H1 EQL Strong Magnet]
+🎯 TP3: 4314.12 — [HTF H4 Swing Low]
+`;
+
+test("PS24 — the declared DOL becomes the target the R:R is judged on", () => {
+  // The whole trade is a delivery to 4354.10. TP1 is the partial taken on
+  // the way, and judging the setup on it is what refused a live winner.
+  const { parsed } = parseSetupText(V6_PASTE);
+  assert.equal(parsed.tp2, 4354.1);
+  assert.equal(parsed.rr_target, "tp2", "DOL 4354.10 is TP2, so TP2 is the objective");
+});
+
+test("PS25 — a DOL that matches no declared target leaves the default alone", () => {
+  // Guessing which target a stray level meant would be worse than
+  // measuring TP1, which is at least what the operator already expects.
+  const { parsed } = parseSetupText(V6_PASTE.replace("DOL: 4354.10", "DOL: 4200.00"));
+  assert.equal(parsed.rr_target, null);
+});
+
+test("PS26 — the PDA band is the entry zone the trigger fires inside", () => {
+  // Without it the zone collapses to entry ± tolerance — 0.20 wide on gold
+  // — which no live tick sits inside for long, so every in-zone rule the
+  // monitor has is unreachable and confirmation can only arrive late.
+  const { parsed } = parseSetupText(V6_PASTE);
+  assert.equal(parsed.entry_zone_low, 4404.0);
+  assert.equal(parsed.entry_zone_high, 4408.0);
+});
+
+test("PS27 — a PDA band that disagrees with the entry or the stop is ignored", () => {
+  // Same consistency rule the KURTHI zone already answers to: a band
+  // quoted from another leg must not be able to move the entry.
+  const { parsed, warnings } = parseSetupText(V6_PASTE.replace("[4404.00 - 4408.00]", "[4420.00 - 4430.00]"));
+  assert.equal(parsed.entry_zone_low, null, "the stop sits inside that band");
+  assert.ok(warnings.some((w) => /PDA|zone/i.test(w)));
+});
+
+test("PS28 — the v6 block still parses into a registrable watch", () => {
+  const { parsed } = parseSetupText(V6_PASTE);
+  const watch = validateWatchInput({ ...parsed, symbol: "XAUUSD" });
+  assert.equal(watch.direction, "sell");
+  assert.equal(watch.entry, 4404.5);
+  assert.equal(watch.sl, 4415.5);
+  assert.equal(watch.rr_target, "tp2");
+  assert.equal(watch.entry_zone_low, 4404.0);
+});
+
+test("PS29 — the declared invalidation is read, not inferred past the stop", () => {
+  // v6 writes "INVALID:", not "INVALIDATION:". Missing the label meant the
+  // monitor invented a level 1.6 beyond the one the analysis declared dead,
+  // and would have kept a broken setup alive across it.
+  const { parsed } = parseSetupText(V6_PASTE + "\nINVALID: Body close mbi ekstremitetin e kurthit 4415.00\n");
+  assert.equal(parsed.invalidation, 4415.0);
+});
+
+test("PS30 — the warning names the block the zone actually came from", () => {
+  // The operator reads these in Telegram. "taken from the KURTHI landing
+  // zone" for a band that came from the PDA line is a wrong answer to
+  // "where did this zone come from".
+  const { warnings } = parseSetupText(V6_PASTE);
+  assert.ok(
+    warnings.some((w) => /PDA/i.test(w) && /4404/.test(w)),
+    `expected a PDA-sourced zone warning, got: ${warnings.join(" | ")}`,
+  );
 });
