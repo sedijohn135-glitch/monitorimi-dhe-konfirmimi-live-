@@ -49,6 +49,15 @@
 import express from "express";
 import "dotenv/config";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+// One version string, read from the manifest. It used to be three
+// literals — 7.3.0 in the MCP handshake, 7.1.0 in /health, 7.3.0 in
+// package.json — and a version the operator cannot trust is worse than
+// no version at all when the question is "did my deploy land?".
+const VERSION = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf8"),
+).version;
 
 import {
   ANTI_SL_DEFAULTS,
@@ -373,6 +382,10 @@ const CONFIG = {
   // for a manual position, so this changes the level the monitor watches
   // and tells the operator to move his own — it cannot move it for him.
   breakEvenOnTp1: process.env.BREAK_EVEN_ON_TP1 !== "false",
+  // One Telegram line on every boot. The operator deploys by merging and
+  // has no other way to see that the new code is live, or that Telegram
+  // delivery still works from this container.
+  startupNotification: process.env.STARTUP_NOTIFICATION !== "false",
 
   autoTrade: autoTradeConfig(),
   promotion: promotionConfig(),
@@ -4599,7 +4612,7 @@ async function handleMcpRequest(req, res) {
       result: {
         protocolVersion: body.params?.protocolVersion || CONFIG.protocolVersion,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "cTrader + Watch Monitor MCP", version: "7.3.0" },
+        serverInfo: { name: "cTrader + Watch Monitor MCP", version: VERSION },
       },
     });
     return;
@@ -4682,7 +4695,7 @@ app.get("/health", (req, res) => {
   const base = {
     status: "ok",
     service: "watch-monitor-mcp",
-    version: "7.1.0",
+    version: VERSION,
     watches: store.setups.size,
     trap_watches: store.traps.size,
     uptime_seconds: Math.floor(process.uptime()),
@@ -4890,21 +4903,41 @@ function boot() {
       { dedupeKey: `${pending.id}:execution-unknown`, priority: "critical" },
     );
   }
+  // A boot says two different things depending on what it found, and
+  // both are worth one line.
+  //
+  // It used to say nothing at all when there was nothing to recover — a
+  // deliberate choice not to spam, and the wrong one: the operator
+  // deploys by merging a pull request and this message is his only
+  // evidence that the new code is running and that Telegram delivery
+  // works from this container. A silent boot is indistinguishable from a
+  // deploy that never happened.
+  const offlineFor = recovery.savedAt
+    ? `${Math.round((Date.now() - Date.parse(recovery.savedAt)) / 60000)} min`
+    : "unknown";
   if (recovery.setups || recovery.traps || recovery.expired) {
-    const offlineFor = recovery.savedAt
-      ? `${Math.round((Date.now() - Date.parse(recovery.savedAt)) / 60000)} min`
-      : "unknown";
     log(
       `recovered ${recovery.setups} setup watch(es), ${recovery.traps} trap watch(es), expired ${recovery.expired}`,
     );
+    if (CONFIG.startupNotification) {
+      notify(
+        `<b>🔄 MONITOR RESTARTED — v${htmlEscape(VERSION)}</b>\n` +
+          `<b>Recovered:</b> ${recovery.setups} setup · ${recovery.traps} trap\n` +
+          (recovery.expired ? `<b>Expired while offline:</b> ${recovery.expired}\n` : "") +
+          `<b>Gap:</b> ${htmlEscape(offlineFor)}\n` +
+          `<i>Evidence was discarded and must re-accumulate under live observation. ` +
+          `Anything that happened during the gap was not seen — re-check any position manually.</i>`,
+        { priority: "critical" },
+      );
+    }
+  } else if (CONFIG.startupNotification) {
+    log(`started clean, nothing to recover (v${VERSION})`);
     notify(
-      `<b>MONITOR RESTARTED</b>\n` +
-        `<b>Recovered:</b> ${recovery.setups} setup · ${recovery.traps} trap\n` +
-        (recovery.expired ? `<b>Expired while offline:</b> ${recovery.expired}\n` : "") +
-        `<b>Gap:</b> ${htmlEscape(offlineFor)}\n` +
-        `<i>Evidence was discarded and must re-accumulate under live observation. ` +
-        `Anything that happened during the gap was not seen — re-check any position manually.</i>`,
-      { priority: "critical" },
+      `<b>✅ MONITOR ONLINE — v${htmlEscape(VERSION)}</b>\n` +
+        `<b>Auto-trade:</b> ${autoTradeStatus().armed ? "ARMED" : "off"} · ` +
+        `<b>Kill zone gate:</b> ${CONFIG.killZoneEnabled ? "on" : "off"}\n` +
+        `<i>Asnjë setup aktiv për të rikuperuar. Gati për paste.</i>`,
+      { priority: "normal" },
     );
   }
   startScheduler();
