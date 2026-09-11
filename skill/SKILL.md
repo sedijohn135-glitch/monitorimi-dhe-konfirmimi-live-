@@ -64,8 +64,51 @@ python3 scripts/mcp_discovery.py --manual
 | **Watch (event-driven)** | `watch.register`, `watch.poll`, `trap.watch.start` | 🟢 Polling fallback |
 | **Register** | `register.alert`, `register.order`, `register.position` | 🟢 Vetëm nëse aktivizon |
 | **Skill context** | `skill_context.audit` (`get_skill_context_audit`) | 🟢 Pa audit, conviction-i nuk kalibrohet |
+| **Chart** | `get_chart_image` | 🟢 Lexo strukturën nga numrat (shih §2.4) |
 
 Detajet e kontratës MCP → [references/00-mcp-contract.md](references/00-mcp-contract.md)
+
+### 2.4 · CHART + NUMRA — Ndarja e Punës
+
+`get_chart_image` vizaton qirinjtë **nga i njëjti varg OHLC** që lexoj unë.
+Nuk është foto e një terminali: pamja dhe numrat janë i njëjti objekt, dhe
+nivelet e shënuara vizatohen si tekst i saktë. Prandaj nuk ekziston burim
+i dytë i së vërtetës — ekziston një burim me dy pamje.
+
+Kjo zëvendëson analizën me screenshot-e. Nuk e shton mbi të.
+
+| Kush vendos | Çfarë |
+|---|---|
+| **Chart** | konteksti, forma e range-ut, trend apo chop, ku ndodhet çmimi brenda strukturës, a *duket* i inskenuar kurthi |
+| **Numrat** | çdo nivel që hyn te output-i: entry, SL, TP, kufijtë e FVG-së, swing anchor, CE |
+
+⛔ **RREGULL I PATHYESHËM: asnjë nivel nuk hyn te output-i nga imazhi.**
+
+Nëse chart-i sugjeron një nivel, e konfirmoj nga qirinjtë para se ta
+shkruaj. Jo se imazhi gënjen — por leximi me sy ka tolerancë dhe vargu
+nuk ka. Imazhi jep narrativën; numrat zotërojnë nivelet.
+
+**Sa chart-e:** dy. Jo shtatë.
+
+```
+get_chart_image(symbol, timeframe="H1",  bars=120)   → konteksti HTF
+get_chart_image(symbol, timeframe="M5",  bars=120,
+                levels=[entry, sl, tp1])             → zona e hyrjes
+```
+
+Çdo imazh kushton kohë dhe tokens. Shtatë timeframe në pamje e ngadalësojnë
+analizën pa shtuar asgjë që numrat s'e japin — strukturën e matshme
+(swing, BOS, FVG, sweep) e llogarit tashmë aritmetika.
+
+Parametri `levels` vizaton entry/SL/TP si vija me pika dhe **e zgjeron
+boshtin**, që një stop jashtë range-ut të qirinjve të mbetet i dukshëm në
+vend që të zhduket. Përdore te chart-i i dytë, pasi nivelet janë fiksuar.
+
+**Nëse `get_chart_image` nuk ekziston** (p.sh. analizë në një Gem):
+- nëse operatori ka ngarkuar screenshot-e → ato zënë vendin e chart-it,
+  me të njëjtin rregull: asnjë nivel nga fotoja pa konfirmim numerik;
+- nëse jo → analizë vetëm me numra. Kjo mbetet e vlefshme dhe e plotë;
+  humbet vetëm leximi i formës. **Mos e përmend mungesën.**
 
 ### 2.3 · Event-Driven Watch Pattern (i Ri)
 
@@ -114,7 +157,7 @@ Shih `mcp_config.yaml` për 8 seksione të konfigurimit:
                             ↓
 ┌────────────────────────────────────────────────────────────┐
 │  MODULE 01 — LIQUIDITY INTELLIGENCE CORE                   │
-│  (Merr të dhëna MCP. Identifiko pool-et. LOCK Objective.)  │
+│  (Merr të dhëna MCP + chart HTF §2.4. Pool-et. LOCK.)      │
 └────────────────────────────────────────────────────────────┘
                             ↓
 ┌────────────────────────────────────────────────────────────┐
