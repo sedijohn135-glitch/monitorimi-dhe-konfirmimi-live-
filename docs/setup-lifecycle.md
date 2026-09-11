@@ -194,12 +194,31 @@ Only drift that makes the fill *worse* counts. A buy filling below its
 planned entry is a better trade, not a missed one.
 
 There is also a floor on what remains of the reward-to-risk **at the
-fill** (`ENTRY_MIN_REMAINING_RR`, default `0.5`). It is deliberately
-below the 1R that registration demands, because this engine does not
-enter at the planned entry by design: the acceptance requirement makes
-price travel up to 0.35 of the risk distance beyond entry before it will
-confirm at all. A 1R floor here would refuse the very entries the
-confirmation rules exist to produce.
+fill** (`ENTRY_MIN_REMAINING_RR`, default `1.5`). It is well above the 1R
+registration demands, and deliberately so: setups analysed at 2.33R and
+2.65R were confirmed at 0.85R and 1.22R and notified as though nothing
+had changed. Below this floor the entry notification is withheld and
+`SETUP_DEGRADED` is sent instead.
+
+That floor is measured against `rr_target` — the setup's **objective**,
+not its first partial. This is the pairing that matters, because the two
+halves fail together: the engine does not enter at the planned entry by
+design (acceptance makes price travel up to 0.35 of the risk distance
+beyond entry first), so a 1.5R floor measured against a TP1 the analysis
+itself labelled "Low Hanging Fruit" refuses almost everything.
+
+A real setup makes it concrete. XAUUSD short, entry 4361.50, stop 4378,
+TP1 4344, TP3 4314, the analysis declaring 1:2.8:
+
+| Measured to | At the fill | Outcome |
+|---|---|---|
+| TP1 (1.06R planned) | 0.53R | **refused** — SETUP_DEGRADED |
+| TP3 (2.88R planned) | 1.87R | entered |
+
+Same setup, same fill, opposite answers. So `rr_target` is not a
+refinement: without it, this floor refuses the setups the engine exists
+to take. `parse-setup` derives it from the analysis's own `DOL:` line,
+and failing that from the ratio the analysis declared.
 
 ## Setup-specific defence
 
