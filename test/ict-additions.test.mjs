@@ -14,7 +14,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { checkMidnightJudas, nyMidnightOpen, pdaConfluence } from "../lib/ict.mjs";
+import {
+  checkMidnightJudas,
+  inOteZone,
+  momentumFade,
+  nyMidnightOpen,
+  oteZone,
+  pdaConfluence,
+  sequentialDrive,
+} from "../lib/ict.mjs";
 import { advanceStructureFailure, evaluateConfirmation, macroStatus } from "../lib/core.mjs";
 
 const M5 = 5 * 60_000;
@@ -219,4 +227,71 @@ test("CONFIRMATION — PDA confluence graduates like any other technical signal"
   }
   assert.equal(result.enter, true);
   assert.ok(result.signals.includes("PDA Confluence"));
+});
+
+// ---------------------------------------------------------------------------
+// §Q Entry quality — the three reads taken from the operator's own
+// reference charts. Reported on the entry message, never gates.
+
+test("Q1 — momentum fade needs a one-sided push with shrinking bodies", () => {
+  const bar = (open, high, low, close, t) => ({ open, high, low, close, timestampMs: t });
+  // Three bearish candles against a buy, each smaller than the last.
+  const fading = [bar(100, 100.1, 97, 97, 1), bar(97, 97.2, 95.5, 95.5, 2), bar(95.5, 95.6, 95, 95, 3)];
+  const faded = momentumFade(fading, "buy");
+  assert.equal(faded.present, true);
+  assert.deepEqual(faded.bodies, [3, 1.5, 0.5]);
+
+  // Growing bodies are the opposite reading.
+  const growing = [bar(100, 100.1, 99.5, 99.5, 1), bar(99.5, 99.6, 98, 98, 2), bar(98, 98.1, 95, 95, 3)];
+  assert.equal(momentumFade(growing, "buy").present, false);
+
+  // A mixed run is not a push at all.
+  const mixed = [bar(100, 101, 97, 97, 1), bar(97, 99, 96.9, 98.5, 2), bar(98.5, 98.6, 98, 98, 3)];
+  assert.equal(momentumFade(mixed, "buy").reason, "the push is not one-sided");
+
+  // Too few bars is unknown, never a false negative dressed as a fact.
+  assert.equal(momentumFade([fading[0]], "buy").known, false);
+});
+
+test("Q2 — three soldiers must step, not merely share a colour", () => {
+  const bar = (open, high, low, close, t) => ({ open, high, low, close, timestampMs: t });
+  const soldiers = [bar(100, 103, 99.8, 102, 1), bar(101, 105, 100.9, 104, 2), bar(103, 107, 102.9, 106, 3)];
+  assert.equal(sequentialDrive(soldiers, "buy").present, true);
+  assert.match(sequentialDrive(soldiers, "buy").reason, /three white soldiers/);
+  assert.equal(sequentialDrive(soldiers, "sell").present, false);
+
+  // Same colour, but the third gaps open above the second's body: three
+  // unrelated candles, not the pattern.
+  const gapped = [bar(100, 103, 99.8, 102, 1), bar(101, 105, 100.9, 104, 2), bar(106, 109, 105.9, 108, 3)];
+  assert.equal(sequentialDrive(gapped, "buy").present, false);
+});
+
+test("Q3 — the OTE band is measured from the swings, not asserted", () => {
+  const bar = (open, high, low, close, t) => ({ open, high, low, close, timestampMs: t });
+  // A leg from a swing low of 95 to a swing high of 205, both strict.
+  const bars = [
+    bar(100, 101, 99, 100, 1),
+    bar(100, 105, 98, 104, 2),
+    bar(104, 103, 95, 96, 3),
+    bar(96, 110, 97, 109, 4),
+    bar(109, 205, 108, 200, 5),
+    bar(200, 201, 150, 160, 6),
+    bar(160, 165, 150, 155, 7),
+  ];
+  const zone = oteZone(bars, "sell");
+  assert.equal(zone.known, true);
+  // 95 + 110 × 0.618 = 162.98 ; 95 + 110 × 0.79 = 181.9
+  assert.ok(Math.abs(zone.low - 162.98) < 0.1, `low ${zone.low}`);
+  assert.ok(Math.abs(zone.high - 181.9) < 0.1, `high ${zone.high}`);
+
+  assert.equal(inOteZone(bars, 170, "sell").present, true);
+  assert.equal(inOteZone(bars, 120, "sell").present, false);
+
+  // A buy retraces down from the high instead.
+  const buyZone = oteZone(bars, "buy");
+  assert.ok(Math.abs(buyZone.low - 118.1) < 0.2, `low ${buyZone.low}`);
+
+  // No readable leg is unknown, not "outside".
+  const flat = [bar(100, 100, 100, 100, 1), bar(100, 100, 100, 100, 2), bar(100, 100, 100, 100, 3)];
+  assert.equal(inOteZone(flat, 100, "buy").known, false);
 });

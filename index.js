@@ -135,7 +135,13 @@ import {
   watchKey,
   zoneTouchLevel,
 } from "./lib/core.mjs";
-import { checkMidnightJudas, pdaConfluence } from "./lib/ict.mjs";
+import {
+  checkMidnightJudas,
+  inOteZone,
+  momentumFade,
+  pdaConfluence,
+  sequentialDrive,
+} from "./lib/ict.mjs";
 import { CTraderMcpClient, MarketData, asArray } from "./lib/upstream.mjs";
 import { Executor } from "./lib/execution.mjs";
 import {
@@ -847,6 +853,21 @@ function directionLabel(watch) {
  * shuts at 11:00, or a Breaker entry that dies on a close through the
  * Breaker, changes what he does over the next hour.
  */
+/**
+ * How well the market defended this setup, in one line. Every term is
+ * advisory — the entry already passed every gate before this renders — so
+ * it is written as observations, not as a verdict.
+ */
+function qualityLine(watch) {
+  const q = watch.quality;
+  if (!q) return "";
+  const parts = [];
+  if (q.momentum_fade?.present) parts.push("momentum kundër po shuhet");
+  if (q.sequential_drive?.present) parts.push(q.sequential_drive.reason);
+  if (q.ote?.known) parts.push(q.ote.present ? "entry brenda OTE 0.618–0.79" : "entry jashtë OTE");
+  return parts.length ? `<b>Kualiteti:</b> ${htmlEscape(parts.join(" · "))}\n` : "";
+}
+
 function modelLines(watch) {
   const model = watch.entry_model;
   if (!model) return "";
@@ -872,6 +893,7 @@ function confirmWatch(watch, price, result, gates) {
       `<b>Symbol:</b> ${htmlEscape(watch.symbol)}\n` +
       `<b>Direction:</b> ${htmlEscape(directionLabel(watch))}\n` +
       modelLines(watch) +
+      qualityLine(watch) +
       `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>Price:</b> ${htmlEscape(formatLevel(price))}\n` +
       `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
       fillContractLines(watch.fillContract) +
@@ -991,6 +1013,7 @@ function confirmedNotExecutedWatch(watch, price, result, gates, refusal) {
       `<b>Symbol:</b> ${htmlEscape(watch.symbol)}\n` +
       `<b>Direction:</b> ${htmlEscape(directionLabel(watch))}\n` +
       modelLines(watch) +
+      qualityLine(watch) +
       `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>Price:</b> ${htmlEscape(formatLevel(price))}\n` +
       `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
       `<b>Evidence:</b> ${htmlEscape(result.signals.join(" + "))}\n` +
@@ -1881,6 +1904,17 @@ async function tickSetupWatch(watch) {
       }).count >= CONFIG.entryConfluenceMinHits,
   };
 
+  // §Q — three reads that describe how well the market defended this
+  // setup, as opposed to whether it did. Carried onto the watch and shown
+  // on the entry message; they gate nothing. A gate here would refuse
+  // entries the analysis meant, and an entry that never fires looks
+  // exactly like a market that never came.
+  watch.quality = {
+    momentum_fade: momentumFade(m5.bars, watch.direction),
+    sequential_drive: sequentialDrive(m1.bars, watch.direction),
+    ote: inOteZone(m5.bars, watch.entry, watch.direction),
+  };
+
   if (spreadHealth.abnormal) {
     // Evidence is not advanced on a bad quote — the acceptance term is
     // derived from bid/ask and would be measuring the spread, not the
@@ -2267,6 +2301,7 @@ async function tickSetupWatch(watch) {
         price: mid,
         profile: defence.profile,
         lane: watch.entry_lane,
+        quality: watch.quality ?? null,
         fill: fillContract(opportunity),
         latency: watch.latency,
         macroWindow: macroStatus(now).window,
