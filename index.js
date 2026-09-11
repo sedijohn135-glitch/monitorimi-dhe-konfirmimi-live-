@@ -4658,10 +4658,39 @@ async function mergedToolList() {
   // The mutating tools are deliberately left unannotated. Marking
   // `register_watch` read-only would be a lie told to the one caller
   // whose confirmation actually matters.
-  const annotate = (tool) =>
-    MUTATING_TOOLS.has(tool?.name)
-      ? tool
-      : { ...tool, annotations: { ...(tool.annotations || {}), readOnlyHint: true } };
+  // `register_watch` gets the truth about itself, which it never had.
+  //
+  // A client decides whether to confirm from these hints, and the two
+  // that matter here were never set — so both took their spec defaults:
+  // `destructiveHint` defaults to TRUE and `idempotentHint` to FALSE.
+  // The tool was being described as a destructive, non-repeatable write
+  // by omission, which is why it prompted every time.
+  //
+  // What it actually does: creates a watch and sends a Telegram message.
+  // Nothing is destroyed, nothing is overwritten, and calling it twice
+  // with the same setup returns the first watch — `createSetupWatch`
+  // dedupes on `watchKey` before it adds anything.
+  //
+  // Except when auto-trade is armed. Then the monitor's own loop can turn
+  // that watch into a real order, and the call really can move money. So
+  // the hint is computed per request rather than fixed: honest in both
+  // states, and the prompt comes back exactly when it should.
+  const armed = autoTradeStatus().armed === true;
+  const annotate = (tool) => {
+    if (!MUTATING_TOOLS.has(tool?.name)) {
+      return { ...tool, annotations: { ...(tool.annotations || {}), readOnlyHint: true } };
+    }
+    if (tool.name !== "register_watch") return tool;
+    return {
+      ...tool,
+      annotations: {
+        ...(tool.annotations || {}),
+        readOnlyHint: false,
+        destructiveHint: armed,
+        idempotentHint: true,
+      },
+    };
+  };
 
   const custom = CONFIG.mcpAnalysisOnly
     ? CUSTOM_TOOLS.filter(
