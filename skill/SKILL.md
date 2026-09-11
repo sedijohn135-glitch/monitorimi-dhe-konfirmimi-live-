@@ -492,28 +492,52 @@ Nëse çmimi kalon 1σ → nuk është sweep, është displacement real. Anulo.
 
 ## 15 · MODULE 08 — EXECUTION + OUTPUT
 
-### 15.1 · Entry Models (Vetëm këto — V11+)
+### 15.1 · Entry Models — Katalogu i Bashkuar (35)
+
+⛔ **Shkruaj EMRIN e modelit, jo numrin.** Numrat 1–22 janë të katalogut
+v6.0; 23–35 janë modelet e listës së vjetër që v6.0 nuk i ka. Emri nuk
+ngatërrohet kurrë, numri po — dhe kur të dy kundërshtohen, boti ndjek emrin.
+
+Për *Silver Bullet* dhe *Opening Range* thuaj gjithmonë dritaren
+("Silver Bullet AM"), përndryshe boti nuk gjen dot cilin nga tre.
 
 | # | Model | Përshkrim |
 |---|-------|-----------|
 | 1 | **ICT 2022 Model** | SSL/BSL → BOS → FVG → Entry (NY KZ 7:00-9:00 AM) |
 | 2 | **Market Anchor** | ATH + SSL sweep + Inversion FVG → Long (kurrë Short te ATH) |
-| 3 | **Model 2 Amplified** | E martë/mërkurë/enjte; Bli <6 AM / Shit >6 AM; SL max 50 pips |
-| 4 | **Silver Bullet** | 3:00-4:00 AM / 10:00-11:00 AM / 2:00-3:00 PM NY ET |
-| 5 | **Turtle Soup** | Fade 20-day high/low breakouts (Raschke) |
-| 6 | **OB+FVG Confluence** | OB anchor + FVG CE overlap |
-| 7 | **Unicorn** | 2nd Stage Redistribution MMXM/MMBM |
-| 8 | **RIFVG** | Reaper Inversion FVG (E14) |
-| 9 | **MMXM/MMBM Full** | 4-Stage sequence (Accumulation/Distribution/Redistribution) |
-| 10 | **BISI/SIBI** | Volume Imbalance entry |
-| 11 | **Vault Pocket** | Inner OB inside range |
-| 12 | **SDR (Standard Deviation Rejection)** | SD projection reversal |
-| 13 | **DRO (Daily Range Open)** | Open of day as anchor |
-| 14 | **LSS (Liquidity Sweep Setup)** | Pure sweep + MSS |
-| 15 | **OSST** | One-Shot Setup |
-| 16 | **STRC** | Structure + CSD |
-| 17 | **SRT** | Sweep-Retest-Trap |
-| 18 | **FBE** | Fibo-Body-Entry |
+| 3 | **Model 2 Amplified** | E martë/mërkurë, 6 AM ET, PDA mujore/javore |
+| 4 | **Turtle Soup** | Fade 20-day high/low breakouts (Raschke) |
+| 5 | **Turtle Soup Deferred + Rejection** | Retest pas stop hunt: wick brenda PDA, trup jashtë |
+| 6 | **Silver Bullet London** | 3:00-4:00 AM NY ET |
+| 7 | **Silver Bullet AM** | 10:00-11:00 AM NY ET |
+| 8 | **Silver Bullet PM** | 2:00-3:00 PM NY ET |
+| 9 | **OTE** | Fibo 0.618-0.79 pas BOS në LTF |
+| 10 | **IOFED** | Nested FVG brenda FVG-së origjinale |
+| 11 | **Smart Money 3-Stage Staging** | 3 faza shpërndarjeje në ATH (vetëm SHORT) |
+| 12 | **Opening Range FPFVG (AM)** | FVG e parë pas OR 7:00-7:30 |
+| 13 | **Opening Range FPFVG (PM)** | FVG e parë pas OR 1:30-2:00 PM |
+| 14 | **NY Lunch Macro → PM** | Target i drekës, hyrje pas 13:00 |
+| 15 | **Low Resistance Liquidity Run** | BSL/SSL e marrë, rrugë e pastër |
+| 16 | **High Resistance Conditions** | ⛔ FILTER — PASS, asnjë hyrje |
+| 17 | **Venom** | SIBI → BISI → entry ≤ BISI close |
+| 18 | **Judas Swing** | Sweep i Asian Range pas Midnight Open |
+| 19 | **CISD** | Open i qirit para displacement thyhet |
+| 20 | **Breaker Block** | Kthim te Breaker pas H-L-HH |
+| 21 | **Suspension Block Inversion** | Wick brenda, trup jashtë + displacement |
+| 22 | **Power of 3 Distribution** | Accumulation → Manipulation → Distribution |
+| 23 | **OB+FVG Confluence** | OB anchor + FVG CE overlap |
+| 24 | **Unicorn** | 2nd Stage Redistribution MMXM/MMBM |
+| 25 | **RIFVG** | Reaper Inversion FVG (E14) |
+| 26 | **MMXM/MMBM Full** | 4-Stage sequence |
+| 27 | **BISI/SIBI** | Volume Imbalance entry |
+| 28 | **Vault Pocket** | Inner OB inside range |
+| 29 | **SDR** | SD projection reversal |
+| 30 | **DRO** | Open of day as anchor |
+| 31 | **LSS** | Pure sweep + MSS |
+| 32 | **OSST** | One-Shot Setup |
+| 33 | **STRC** | Structure + CSD |
+| 34 | **SRT** | Sweep-Retest-Trap |
+| 35 | **FBE** | Fibo-Body-Entry |
 
 ### 15.2 · Risk Management (ATR-Based — Detyrim)
 
@@ -603,7 +627,7 @@ SHORT SL:  entry + (k × ATR)
     "confirmations": {"fvg_50pct": true, "wick_3x": true, "mss_displacement": true, "volume_absorption": true}
   },
   "execution": {
-    "model": "ICT 2022|Market Anchor|Model 2|Silver Bullet|...",
+    "model": "EMRI i modelit — p.sh. \"ICT 2022\", \"Silver Bullet AM\", \"Venom\". Jo numri.",
     "direction": "buy|sell|null",
     "entry": 0.0,
     "shadow_entry": 0.0,
@@ -1020,7 +1044,7 @@ instruments:
 | 04 | [trap-engine.md](references/04-trap-engine.md) | $10B Pyetja, 8 TIP Questions, Trap Sub-Types |
 | 05 | [pda-arrays.md](references/05-pda-arrays.md) | OB/FVG/BB/RB/BPR/IFVG/BISI/SIBI/RIFVG, Breaker Precedence |
 | 06 | [zero-float.md](references/06-zero-float.md) | Shadow Entry, Fibo Master, Quasimodo, Sweep Ceiling |
-| 07 | [entry-models.md](references/07-entry-models.md) | 19 modelet e hyrjes (ICT 2022, MMXM, RIFVG, Venom, etj.) |
+| 07 | [entry-models.md](references/07-entry-models.md) | 35 modelet e hyrjes — katalogu i bashkuar (v6.0 1-22 + hybrid 23-35) |
 | 08 | [risk-management.md](references/08-risk-management.md) | ATR Stop, Position Sizing, Sweep Buffer |
 | 09 | [london-ny-am-pm.md](references/09-london-ny-am-pm.md) | Judas Swing, SD Projections, Macro specifics |
 | 10 | [lifecycle-stages.md](references/10-lifecycle-stages.md) | MMXM/MMBM 4-Stage, Curve Side, Polarity Flip |

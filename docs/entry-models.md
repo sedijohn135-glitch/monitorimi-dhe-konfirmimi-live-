@@ -1,7 +1,8 @@
-# 22 modelet e hyrjes dhe 4 kill switch-at
+# 35 modelet e hyrjes dhe 4 kill switch-at
 
-Katalogu i MULTISNIPER07 v6.0, i shkruar ashtu që monitori të mund të
-veprojë mbi të — jo vetëm ta printojë emrin e modelit.
+Katalogu i MULTISNIPER07 v6.0 (1–22) plus modelet e listës së vjetër me
+19 modele që v6.0 nuk i ka (23–35), i shkruar ashtu që monitori të mund
+të veprojë mbi të — jo vetëm ta printojë emrin e modelit.
 
 Kodi: [`lib/entry-models.mjs`](../lib/entry-models.mjs) dhe
 [`lib/kill-switch.mjs`](../lib/kill-switch.mjs). Cikli i plotë i setup-it
@@ -35,6 +36,30 @@ Zone-s dhe e lajmeve që ekzistojnë tashmë.
 Një emër modeli që nuk njihet nuk është gabim: setup-i mbetet me nivelet e
 veta dhe thjesht nuk merr asnjë politikë modeli.
 
+## Numrat — dy katalogë, një listë
+
+Repoja kishte dy lista modelesh. Ato pajtohen vetëm te **1, 2 dhe 3**; nga
+4 e tutje i njëjti numër do të thoshte dy modele të ndryshme. Asnjë model
+nuk u hoq: numrat **1–22** janë të v6.0, dhe modelet e listës së vjetër që
+v6.0 nuk i ka mbajtën identitetin dhe morën **23–35**.
+
+Prandaj rezolucioni i emrit punon kështu:
+
+| Çfarë dërgon setup-i | Çfarë kupton boti |
+|---|---|
+| `"Venom"`, `"Silver Bullet AM"`, `"Unicorn"` | modelin — emri nuk ngatërrohet kurrë |
+| `"Modeli 7"` | modelin 7 të v6.0 — katalogun që shkruan analiza |
+| `"Model 5 — Turtle Soup"` (numri ≠ emri) | **Turtle Soup** — emri fiton, numri raportohet si mospërputhje |
+| `"Silver Bullet"` pa dritare | **asnjë model** — tre dritare, s'ka si të zgjidhet pa hamendësuar |
+| emër që nuk njihet | asnjë model; setup-i mbetet me nivelet e veta |
+
+Një familje pa përcaktim (*Silver Bullet*, *Opening Range*) nuk zgjidhet as
+me numrin: teksti thotë Silver Bullet, ndaj ta emërtoje Turtle Soup sepse
+aty ndodhet një "4" do të ishte emërtim i një modeli që analisti nuk e
+shkroi. Boti e monitoron setup-in pa politikë modeli dhe nuk gënjen.
+
+**Rregull praktik: shkruaj emrin, jo numrin.**
+
 ## Katalogu
 
 | # | Modeli | Trigger | Validation | Invalidation | Politika e makinës |
@@ -61,6 +86,26 @@ veta dhe thjesht nuk merr asnjë politikë modeli.
 | 20 | Breaker Block | kthim te Breaker pas H-L-HH | Breaker Precedence respektohet | Breaker thyhet | body_close |
 | 21 | Suspension Block Inversion | wick depërton, trup jashtë + displacement | CE si kufi i fortë | trup mbyllet pastër mbi/nën CE | rejection+displacement · body_close |
 | 22 | Power of 3 Distribution | kalim Manipulation → Distribution | largim i shpejtë nga manipulimi | kthim brenda kutisë së manipulimit | body_close · 24 qirinj |
+
+### Modelet e listës së vjetër (23–35)
+
+Të njëjtat rregulla; numrat e tyre nuk përplasen me v6.0 sepse nisin pas 22.
+
+| # | Modeli | Trigger | Validation | Invalidation | Politika e makinës |
+|---|---|---|---|---|---|
+| 23 | OB + FVG Confluence | OB (CISD anchor) + FVG që e mbivendos | CE e FVG-së brenda OB respektohet | trup mbyllet jashtë OB | body_close |
+| 24 | Unicorn | 2nd Stage nis me displacement masiv | FVG e 2nd Stage respektohet | kthim brenda 1st Stage | rejection+displacement · 9 qirinj |
+| 25 | RIFVG | Inversion FVG brenda Breaker leg | wick depërton, trup respekton 50% PD range | trup mbyllet përtej RIFVG | body_close |
+| 26 | MMXM / MMBM Full | cikli 4-fazësh te FVG e 2nd Stage | polarity flip + CE respektohet | thyerje e ekstremeve të 1st Stage | body_close |
+| 27 | BISI / SIBI | çmimi depërton imbalance të pambushur | reagim brenda imbalance-it | trup mbyllet përtej tij | body_close |
+| 28 | Vault Pocket | kthim te OB i brendshëm në range | CE e OB-së respektohet | trup mbyllet përtej OB | body_close |
+| 29 | SDR | Asian Range M5, çmimi te 1.0σ/1.5σ | rejection me wick ≥ 3× trupi | trup mbyllet përtej SD | rejection+displacement · body_close |
+| 30 | DRO | gap në open, kthim te open/50% gap | reagim te open ose 50% gap | trup kalon open-in dhe vazhdon | body_close |
+| 31 | LSS | pool → sweep → MSS me displacement | FVG e MSS respektohet | MSS anulohet me mbyllje trupi | standard |
+| 32 | OSST | të gjitha kushtet A+ njëkohësisht | një hyrje e vetme, target i plotë | çdo kusht A+ që bie | standard |
+| 33 | STRC | CSD — thyerje e Open-it të up-close candle | Propulsion Block respektohet | trup mbyllet përtej Propulsion Block | body_close |
+| 34 | SRT | sweep → retest → trap pattern | trap pattern konfirmohet | kalim i sweep-it pa trap | rejection+displacement |
+| 35 | FBE | Fibo OTE 0.618–0.79 mbi një PDA array | mbyllje **trupi** brenda zonës Fibo | trup mbyllet përtej zonës | body_close |
 
 ## Gjendjet — çfarë sheh operatori dhe çfarë ndjek monitori
 

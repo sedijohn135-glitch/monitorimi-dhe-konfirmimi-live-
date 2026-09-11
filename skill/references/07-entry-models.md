@@ -1,6 +1,39 @@
-# 07 · ENTRY MODELS — 19 Modelet e Hyrjes
+# 07 · ENTRY MODELS — Katalogu i Bashkuar (35 Modele)
 
 Çdo model është valid VETËM kur kushtet e tij specifike plotësohen.
+
+> ## ⚠️ NUMRAT — LEXO KËTË PARA SE TË SHKRUASH NJË SETUP
+>
+> Ky skedar kishte 19 modele me numërtim të vetin. Katalogu v6.0 ka 22 me
+> numërtim tjetër. **Të dy pajtohen vetëm te 1, 2 dhe 3** — nga 4 e tutje,
+> i njëjti numër do të thoshte dy modele të ndryshme.
+>
+> Asnjë model nuk u hoq. Numrat **1–22** i përkasin katalogut v6.0 (ai që
+> shkruan Gemini); modelet e kësaj liste që v6.0 nuk i ka mbajtën
+> identitetin e tyre dhe morën numrat **23–35**.
+>
+> | Ky skedar (i vjetër) | Tani |
+> |---|---|
+> | 1 ICT 2022 · 2 Market Anchor · 3 Model 2 Amplified | **të pandryshuar** |
+> | 4 Silver Bullet | **6 / 7 / 8** (London / AM / PM) |
+> | 5 Turtle Soup | **4** |
+> | 6 OB+FVG · 7 Unicorn · 8 RIFVG · 9 MMXM/MMBM | **23 · 24 · 25 · 26** |
+> | 10 BISI/SIBI · 11 Vault Pocket · 12 SDR · 13 DRO | **27 · 28 · 29 · 30** |
+> | 14 LSS · 15 OSST · 16 STRC · 17 SRT · 18 FBE | **31 · 32 · 33 · 34 · 35** |
+> | 19 Venom | **17** |
+>
+> **RREGULL PRAKTIK: shkruaj EMRIN, jo numrin.** Boti i njeh të gjithë
+> emrat dhe emri nuk ngatërrohet kurrë. Kur një setup dërgon numër dhe
+> emër që kundërshtojnë njëri-tjetrin, **emri fiton**.
+>
+> Për *Silver Bullet* dhe *Opening Range* thuaj gjithmonë cilën dritare —
+> "Silver Bullet AM", "Opening Range PM". Pa dritare boti nuk gjen dot
+> model dhe e monitoron setup-in pa politikë modeli, se të hamendësonte
+> orën do të ishte më keq.
+>
+> Katalogu i plotë me Trigger / Validation / Invalidation dhe çfarë
+> kontrollon makina: [`docs/entry-models.md`](../../docs/entry-models.md).
+> Burimi i kodit: [`lib/entry-models.mjs`](../../lib/entry-models.mjs).
 
 ---
 
@@ -61,7 +94,7 @@ Asnjë setup jashtë këtyre kushteve.
 
 ---
 
-## 4 · SILVER BULLET
+## 6 / 7 / 8 · SILVER BULLET (London 3-4 AM · AM 10-11 · PM 2-3)
 
 **Setup:**
 ```
@@ -88,7 +121,7 @@ KOHËT E TJERA NUK KUALIFIKOJNË.
 
 ---
 
-## 5 · TURTLE SOUP
+## 4 · TURTLE SOUP
 
 **Setup:**
 ```
@@ -113,7 +146,7 @@ SL: përtej sweep high/low
 
 ---
 
-## 6 · OB + FVG CONFLUENCE
+## 23 · OB + FVG CONFLUENCE
 
 **Setup:**
 ```
@@ -131,7 +164,7 @@ Statistika: 63% win rate, 1:2.8 R:R, 41% FTMO pass rate
 
 ---
 
-## 7 · UNICORN (2nd Stage Redistribution)
+## 24 · UNICORN (2nd Stage Redistribution)
 
 **Setup:**
 ```
@@ -152,7 +185,7 @@ Karakteristikë: Shpejtësi dhe magnitude maksimale.
 
 ---
 
-## 8 · RIFVG (Reaper Inversion FVG)
+## 25 · RIFVG (Reaper Inversion FVG)
 
 **Setup:**
 ```
@@ -172,7 +205,7 @@ RIFVG Bearish:
 
 ---
 
-## 9 · MMXM / MMBM FULL (Market Maker Models)
+## 26 · MMXM / MMBM FULL (Market Maker Models)
 
 ```
 MMXM (Sell Model) — 4 Stage:
@@ -196,7 +229,7 @@ SL: përtej 1st Stage extremes
 
 ---
 
-## 10 · BISI / SIBI (Volume Imbalance Entry)
+## 27 · BISI / SIBI (Volume Imbalance Entry)
 
 ```
 BISI = Buy Side Imbalance, Sell Side Inefficiency:
@@ -213,7 +246,7 @@ SIBI = Mirror logic
 
 ---
 
-## 11 · VAULT POCKET (Inner OB)
+## 28 · VAULT POCKET (Inner OB)
 
 ```
 OB që ndodhet brenda range (jo në boundary):
@@ -230,7 +263,7 @@ Karakteristikë: Precision entry brenda dealing range.
 
 ---
 
-## 12 · SDR (Standard Deviation Rejection)
+## 29 · SDR (Standard Deviation Rejection)
 
 ```
 - Asian Range i identifikuar
@@ -246,7 +279,7 @@ Karakteristikë: Precision entry brenda dealing range.
 
 ---
 
-## 13 · DRO (Daily Range Open)
+## 30 · DRO (Daily Range Open)
 
 ```
 - Open e ditës si anchor
@@ -262,7 +295,7 @@ Përdoret veçanërisht për indices (gap fill behavior).
 
 ---
 
-## 14 · LSS (Liquidity Sweep Setup)
+## 31 · LSS (Liquidity Sweep Setup)
 
 ```
 Pure sweep + MSS:
@@ -279,7 +312,7 @@ Karakteristikë: Më i thjeshtë se Unicorn, përdoret kur cikli MMXM/MMBM nuk �
 
 ---
 
-## 15 · OSST (One-Shot Setup)
+## 32 · OSST (One-Shot Setup)
 
 ```
 Single-attempt setup:
@@ -299,7 +332,7 @@ Kushte specifike:
 
 ---
 
-## 16 · STRC (Structure + CSD)
+## 33 · STRC (Structure + CSD)
 
 ```
 Structure + Change in State of Delivery:
@@ -316,7 +349,7 @@ CSD 2 (sekondare) kur Propulsion Block aktivizohet.
 
 ---
 
-## 17 · SRT (Sweep-Retest-Trap)
+## 34 · SRT (Sweep-Retest-Trap)
 
 ```
 - Sweep i konfirmuar
@@ -333,7 +366,7 @@ Karakteristikë: Më i ngadalshëm se LSS, por më i sigurt.
 
 ---
 
-## 18 · FBE (Fibo-Body-Entry)
+## 35 · FBE (Fibo-Body-Entry)
 
 ```
 - Fibo retracement (OTE zone 0.618-0.79)
@@ -350,7 +383,7 @@ Karakteristikë: Precision entry bazuar në Fibo overlap me PDA.
 
 ---
 
-## 19 · VENOM (Deferred Turtle Soup)
+## 17 · VENOM (Deferred Turtle Soup)
 
 **Setup:**
 ```
@@ -380,7 +413,7 @@ në ose përtej closing price të candle-it të 2-të.
 
 ---
 
-## 20 · MODEL SELECTION LOGIC
+## MODEL SELECTION LOGIC
 
 ```
 ┌─────────────────────────────────────────────────────┐

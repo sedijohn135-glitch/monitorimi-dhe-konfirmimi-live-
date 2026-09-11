@@ -32,10 +32,14 @@ const setup = (over = {}) => ({ symbol: "XAUUSD", direction: "buy", entry: 4414,
 
 // --- the catalogue ----------------------------------------------------------
 
-test("EM1 — all 22 models are present, numbered 1..22, with unique keys", () => {
-  assert.equal(ENTRY_MODELS.length, 22);
-  assert.deepEqual(ENTRY_MODELS.map((m) => m.number), Array.from({ length: 22 }, (_, i) => i + 1));
-  assert.equal(new Set(ENTRY_MODELS.map((m) => m.key)).size, 22);
+test("EM1 — all 35 models are present, numbered 1..35, with unique keys", () => {
+  // 1-22 are the v6.0 prompt's catalogue; 23-35 are the repo's older
+  // 19-model list, carried across rather than renumbered or dropped.
+  assert.equal(ENTRY_MODELS.length, 35);
+  assert.deepEqual(ENTRY_MODELS.map((m) => m.number), Array.from({ length: 35 }, (_, i) => i + 1));
+  assert.equal(new Set(ENTRY_MODELS.map((m) => m.key)).size, 35);
+  assert.equal(ENTRY_MODELS.filter((m) => m.catalogue === "v6.0").length, 22);
+  assert.equal(ENTRY_MODELS.filter((m) => m.catalogue === "hybrid-v7.2").length, 13);
   for (const model of ENTRY_MODELS) {
     for (const field of ["trigger", "validation", "invalidation"]) {
       assert.ok(model[field]?.length > 10, `model ${model.number} has a ${field}`);
@@ -64,6 +68,51 @@ test("EM4 — an unrecognised name resolves to nothing and is not an error", () 
   const applied = applyEntryModel(validateWatchInput(setup({ setup_model: "diçka tjetër" })), {});
   assert.equal(applied.entry_model, null);
   assert.equal(applied.defence_profile, "standard", "an unknown model changes no default");
+});
+
+test("EM3b — every model the older list had is still reachable by name", () => {
+  const legacy = {
+    "OB + FVG Confluence": 23,
+    Unicorn: 24,
+    RIFVG: 25,
+    "MMXM / MMBM": 26,
+    "BISI / SIBI": 27,
+    "Vault Pocket": 28,
+    SDR: 29,
+    DRO: 30,
+    LSS: 31,
+    OSST: 32,
+    STRC: 33,
+    SRT: 34,
+    FBE: 35,
+  };
+  for (const [name, number] of Object.entries(legacy)) {
+    assert.equal(resolveEntryModel(name)?.model.number, number, `${name} resolves`);
+  }
+});
+
+test("EM3c — when a number and a name disagree, the name wins", () => {
+  // The two catalogues agree on 1-3 and diverge after: "Model 5" is
+  // Turtle Soup Deferred in v6.0 and plain Turtle Soup in the old list.
+  // A name never collides that way, so it decides.
+  const resolved = resolveEntryModel("Model 5 — Turtle Soup");
+  assert.equal(resolved.model.number, 4);
+  assert.match(resolved.matchedBy, /number 5 disagreed/);
+
+  // A bare number still resolves, against the v6.0 numbering the
+  // analysis prompt actually writes to.
+  assert.equal(resolveEntryModel("Model 5").model.number, 5);
+});
+
+test("EM3d — a family name with no window resolves to nothing, never to a guess", () => {
+  // Three Silver Bullets, three different hours. Picking one would
+  // monitor the setup against an hour the analyst never named.
+  assert.equal(resolveEntryModel("Silver Bullet"), null);
+  assert.equal(resolveEntryModel("Modeli 4 — Silver Bullet"), null, "the number does not break the tie either");
+  assert.equal(resolveEntryModel("Opening Range"), null);
+  // Say which, and it resolves.
+  assert.equal(resolveEntryModel("Silver Bullet AM").model.number, 7);
+  assert.equal(resolveEntryModel("Opening Range PM").model.number, 13);
 });
 
 test("EM5 — Model 16 is a filter: registering it is refused outright", () => {
