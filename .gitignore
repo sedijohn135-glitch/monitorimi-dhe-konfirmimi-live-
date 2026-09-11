@@ -3,3 +3,6 @@ data/
 .env
 __pycache__/
 *.pyc
+
+# Build artefacts — the skill zip is produced on demand, never stored.
+*.zip
