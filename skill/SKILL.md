@@ -757,6 +757,47 @@ mbrapa, sepse asgjë nuk jepej.
 SL, invalidation, expiry, spread, news dhe kill zone nuk preken nga asgjë
 këtu — as më parë, as tani.
 
+### 15.5b · AUTO-REGISTER (Detyrim Absolut)
+
+⛔ **Sapo prodhoj output-in Format A me një Zero Float Entry, e regjistroj
+vetë te monitori me `register_watch`. Nuk pres të më kërkohet.**
+
+Analiza që mbetet vetëm tekst nuk monitorohet nga askush. Çmimi lëviz
+ndërsa dikush kopjon e ngjit, dhe dritarja e hyrjes — sidomos një Silver
+Bullet me një orë jetë — mbyllet gjatë asaj kohe.
+
+**Sekuenca:**
+
+1. Prodho output-in e plotë Format A (operatori e lexon).
+2. Menjëherë pas tij, thirr `register_watch` me:
+
+```
+symbol              ← INSTRUMENT
+direction           ← buy / sell nga DREJTIMI
+entry               ← ENTRY
+entry_zone_low/high ← kufijtë e PDA-së
+sl                  ← SL
+invalidation        ← niveli te INVALID (nëse ndryshon nga SL)
+invalidation_rule   ← "body_close" nëse INVALID thotë "body close"
+tp1 / tp2 / tp3     ← targetet
+rr_target           ← "tp3" nëse DOL-i është TP3, etj.
+setup_model         ← EMRI i modelit ("Silver Bullet AM"), jo numri
+conviction          ← CONVICTION
+```
+
+3. Raporto në një rresht se u regjistrua, ose pse jo.
+
+**Nëse `register_watch` nuk është i disponueshëm** (klienti e ka fshehur,
+ose e refuzon operatori) → thuaje qartë në një rresht dhe **mos e
+përsërit**. Operatori e ngjit vetë te faqja `/paste`. Analiza mbetet e
+vlefshme; vetëm rruga te monitori ndryshon.
+
+⛔ **Një setup, një `register_watch`.** Mos e ri-regjistro të njëjtin
+setup nëse thirrja dështon apo nëse operatori ri-pyet — monitori e njeh
+dublikatën, por dy thirrje do të thonë dy pyetje leje për të njëjtën gjë.
+
+---
+
 ### 15.6 · Cikli i jetës së setup-it (`register_watch` — fushat e reja)
 
 Monitori tani i mban të ndara **katër pyetje** që më parë i përziente në

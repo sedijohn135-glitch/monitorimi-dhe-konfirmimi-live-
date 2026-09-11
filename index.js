@@ -392,13 +392,21 @@ const CONFIG = {
   // has no other way to see that the new code is live, or that Telegram
   // delivery still works from this container.
   startupNotification: process.env.STARTUP_NOTIFICATION !== "false",
-  // Read-only MCP. The analysis only ever reads — candles, prices, a
-  // chart image — and setups reach the monitor through the paste page,
-  // so hiding the seven mutating tools removes seven confirmation
-  // prompts from the middle of a live analysis without removing
-  // anything the analysis uses. Off by default: a client that does
-  // register setups over MCP still can.
-  mcpReadOnly: process.env.MCP_READ_ONLY === "true",
+  // The analysis surface. On, the tool list shrinks to what an analysis
+  // session actually uses: every read, plus `register_watch`.
+  //
+  // The six it hides — cancel_watch, the two news-lockout tools, the two
+  // auto-trade tools and register_trap_watch — are operator controls.
+  // They belong to whoever is running the monitor, not to the analysis,
+  // and each one costs a confirmation prompt in the middle of a live
+  // read for a tool that session was never going to call.
+  //
+  // `register_watch` deliberately survives, and deliberately keeps
+  // prompting: it is the analysis's whole purpose — the setup reaching
+  // the monitor without a human retyping it — and it is also the one
+  // call that can arm a trade. Twelve prompts become one, on the call
+  // where a confirmation is worth what it costs.
+  mcpAnalysisOnly: process.env.MCP_ANALYSIS_ONLY === "true",
 
   autoTrade: autoTradeConfig(),
   promotion: promotionConfig(),
@@ -4626,6 +4634,16 @@ const MUTATING_TOOLS = new Set([
   "resume_auto_trade",
 ]);
 
+/**
+ * What an analysis session legitimately needs beyond the reads. Exactly
+ * one thing: putting the setup it just produced in front of the monitor.
+ *
+ * Everything else in MUTATING_TOOLS is an operator control — cancelling
+ * a watch, locking out news, arming or disarming auto-trade — and an
+ * analysis calling any of those would be acting outside its job.
+ */
+const ANALYSIS_TOOLS = new Set(["register_watch"]);
+
 async function mergedToolList() {
   const upstream = await getUpstreamTools();
   const native = filterToMarketData(
@@ -4645,8 +4663,10 @@ async function mergedToolList() {
       ? tool
       : { ...tool, annotations: { ...(tool.annotations || {}), readOnlyHint: true } };
 
-  const custom = CONFIG.mcpReadOnly
-    ? CUSTOM_TOOLS.filter((tool) => !MUTATING_TOOLS.has(tool.name))
+  const custom = CONFIG.mcpAnalysisOnly
+    ? CUSTOM_TOOLS.filter(
+        (tool) => !MUTATING_TOOLS.has(tool.name) || ANALYSIS_TOOLS.has(tool.name),
+      )
     : CUSTOM_TOOLS;
   return [...native, ...custom].map(annotate);
 }
@@ -4730,13 +4750,13 @@ async function handleMcpRequest(req, res) {
       // Hiding a tool from tools/list is not the same as refusing it: a
       // client that remembers the name from an earlier session would
       // still call it.
-      if (CONFIG.mcpReadOnly && MUTATING_TOOLS.has(name)) {
+      if (CONFIG.mcpAnalysisOnly && MUTATING_TOOLS.has(name) && !ANALYSIS_TOOLS.has(name)) {
         jsonRpcError(
           res,
           id,
           -32601,
-          `${name} is unavailable: the monitor is in read-only mode (MCP_READ_ONLY). ` +
-            `Setups reach it through the paste page instead.`,
+          `${name} is an operator control and is unavailable while ` +
+            `MCP_ANALYSIS_ONLY is set. The analysis surface is the reads plus register_watch.`,
         );
         return;
       }
