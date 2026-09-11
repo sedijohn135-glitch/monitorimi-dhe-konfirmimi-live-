@@ -392,6 +392,21 @@ const CONFIG = {
   // has no other way to see that the new code is live, or that Telegram
   // delivery still works from this container.
   startupNotification: process.env.STARTUP_NOTIFICATION !== "false",
+  // The analysis surface. On, the tool list shrinks to what an analysis
+  // session actually uses: every read, plus `register_watch`.
+  //
+  // The six it hides — cancel_watch, the two news-lockout tools, the two
+  // auto-trade tools and register_trap_watch — are operator controls.
+  // They belong to whoever is running the monitor, not to the analysis,
+  // and each one costs a confirmation prompt in the middle of a live
+  // read for a tool that session was never going to call.
+  //
+  // `register_watch` deliberately survives, and deliberately keeps
+  // prompting: it is the analysis's whole purpose — the setup reaching
+  // the monitor without a human retyping it — and it is also the one
+  // call that can arm a trade. Twelve prompts become one, on the call
+  // where a confirmation is worth what it costs.
+  mcpAnalysisOnly: process.env.MCP_ANALYSIS_ONLY === "true",
 
   autoTrade: autoTradeConfig(),
   promotion: promotionConfig(),
@@ -4598,19 +4613,91 @@ async function getUpstreamTools(force = false) {
   }
 }
 
+/**
+ * The monitor tools that change something. Everything else only reads.
+ *
+ * The distinction earns its keep twice: it decides which tools carry the
+ * `readOnlyHint` a client uses to skip its confirmation prompt, and it
+ * decides what `MCP_READ_ONLY` hides.
+ *
+ * It is listed by hand rather than inferred, because being wrong in the
+ * permissive direction here means telling a client that `register_watch`
+ * — which can arm a trade — is safe to call unattended.
+ */
+const MUTATING_TOOLS = new Set([
+  "register_watch",
+  "register_trap_watch",
+  "cancel_watch",
+  "set_news_lockout",
+  "clear_news_lockout",
+  "pause_auto_trade",
+  "resume_auto_trade",
+]);
+
+/**
+ * What an analysis session legitimately needs beyond the reads. Exactly
+ * one thing: putting the setup it just produced in front of the monitor.
+ *
+ * Everything else in MUTATING_TOOLS is an operator control — cancelling
+ * a watch, locking out news, arming or disarming auto-trade — and an
+ * analysis calling any of those would be acting outside its job.
+ */
+const ANALYSIS_TOOLS = new Set(["register_watch"]);
+
 async function mergedToolList() {
   const upstream = await getUpstreamTools();
   const native = filterToMarketData(
     upstream.filter((tool) => !CUSTOM_TOOL_NAMES.has(tool?.name)),
   );
-  // Mark every client-facing tool as read-only so Spark skips the
-  // per-call confirmation. The monitor's own write loop goes through
-  // a separate code path (lib/execution.mjs) and is not affected.
-  const withReadOnlyHint = (tool) => ({
-    ...tool,
-    annotations: { ...(tool.annotations || {}), readOnlyHint: true },
-  });
-  return [...native.map(withReadOnlyHint), ...CUSTOM_TOOLS];
+  // Every tool that only reads says so, so the client can skip its
+  // per-call confirmation. This used to annotate the native market-data
+  // tools alone while claiming in its own comment to cover everything,
+  // which left the analysis stopping for a prompt on `get_chart_image`
+  // and `list_watches` — pure reads — in the middle of a live session.
+  //
+  // The mutating tools are deliberately left unannotated. Marking
+  // `register_watch` read-only would be a lie told to the one caller
+  // whose confirmation actually matters.
+  // `register_watch` gets the truth about itself, which it never had.
+  //
+  // A client decides whether to confirm from these hints, and the two
+  // that matter here were never set — so both took their spec defaults:
+  // `destructiveHint` defaults to TRUE and `idempotentHint` to FALSE.
+  // The tool was being described as a destructive, non-repeatable write
+  // by omission, which is why it prompted every time.
+  //
+  // What it actually does: creates a watch and sends a Telegram message.
+  // Nothing is destroyed, nothing is overwritten, and calling it twice
+  // with the same setup returns the first watch — `createSetupWatch`
+  // dedupes on `watchKey` before it adds anything.
+  //
+  // Except when auto-trade is armed. Then the monitor's own loop can turn
+  // that watch into a real order, and the call really can move money. So
+  // the hint is computed per request rather than fixed: honest in both
+  // states, and the prompt comes back exactly when it should.
+  const armed = autoTradeStatus().armed === true;
+  const annotate = (tool) => {
+    if (!MUTATING_TOOLS.has(tool?.name)) {
+      return { ...tool, annotations: { ...(tool.annotations || {}), readOnlyHint: true } };
+    }
+    if (tool.name !== "register_watch") return tool;
+    return {
+      ...tool,
+      annotations: {
+        ...(tool.annotations || {}),
+        readOnlyHint: false,
+        destructiveHint: armed,
+        idempotentHint: true,
+      },
+    };
+  };
+
+  const custom = CONFIG.mcpAnalysisOnly
+    ? CUSTOM_TOOLS.filter(
+        (tool) => !MUTATING_TOOLS.has(tool.name) || ANALYSIS_TOOLS.has(tool.name),
+      )
+    : CUSTOM_TOOLS;
+  return [...native, ...custom].map(annotate);
 }
 
 function jsonRpcError(res, id, code, message) {
@@ -4689,6 +4776,19 @@ async function handleMcpRequest(req, res) {
     const name = body.params?.name;
     const args = body.params?.arguments || {};
     if (CUSTOM_TOOL_NAMES.has(name)) {
+      // Hiding a tool from tools/list is not the same as refusing it: a
+      // client that remembers the name from an earlier session would
+      // still call it.
+      if (CONFIG.mcpAnalysisOnly && MUTATING_TOOLS.has(name) && !ANALYSIS_TOOLS.has(name)) {
+        jsonRpcError(
+          res,
+          id,
+          -32601,
+          `${name} is an operator control and is unavailable while ` +
+            `MCP_ANALYSIS_ONLY is set. The analysis surface is the reads plus register_watch.`,
+        );
+        return;
+      }
       try {
         res.json({ jsonrpc: "2.0", id, result: await handleCustomTool(name, args) });
       } catch (error) {
