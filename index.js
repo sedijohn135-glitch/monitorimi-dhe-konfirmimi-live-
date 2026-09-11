@@ -392,6 +392,13 @@ const CONFIG = {
   // has no other way to see that the new code is live, or that Telegram
   // delivery still works from this container.
   startupNotification: process.env.STARTUP_NOTIFICATION !== "false",
+  // Read-only MCP. The analysis only ever reads — candles, prices, a
+  // chart image — and setups reach the monitor through the paste page,
+  // so hiding the seven mutating tools removes seven confirmation
+  // prompts from the middle of a live analysis without removing
+  // anything the analysis uses. Off by default: a client that does
+  // register setups over MCP still can.
+  mcpReadOnly: process.env.MCP_READ_ONLY === "true",
 
   autoTrade: autoTradeConfig(),
   promotion: promotionConfig(),
@@ -4598,19 +4605,50 @@ async function getUpstreamTools(force = false) {
   }
 }
 
+/**
+ * The monitor tools that change something. Everything else only reads.
+ *
+ * The distinction earns its keep twice: it decides which tools carry the
+ * `readOnlyHint` a client uses to skip its confirmation prompt, and it
+ * decides what `MCP_READ_ONLY` hides.
+ *
+ * It is listed by hand rather than inferred, because being wrong in the
+ * permissive direction here means telling a client that `register_watch`
+ * — which can arm a trade — is safe to call unattended.
+ */
+const MUTATING_TOOLS = new Set([
+  "register_watch",
+  "register_trap_watch",
+  "cancel_watch",
+  "set_news_lockout",
+  "clear_news_lockout",
+  "pause_auto_trade",
+  "resume_auto_trade",
+]);
+
 async function mergedToolList() {
   const upstream = await getUpstreamTools();
   const native = filterToMarketData(
     upstream.filter((tool) => !CUSTOM_TOOL_NAMES.has(tool?.name)),
   );
-  // Mark every client-facing tool as read-only so Spark skips the
-  // per-call confirmation. The monitor's own write loop goes through
-  // a separate code path (lib/execution.mjs) and is not affected.
-  const withReadOnlyHint = (tool) => ({
-    ...tool,
-    annotations: { ...(tool.annotations || {}), readOnlyHint: true },
-  });
-  return [...native.map(withReadOnlyHint), ...CUSTOM_TOOLS];
+  // Every tool that only reads says so, so the client can skip its
+  // per-call confirmation. This used to annotate the native market-data
+  // tools alone while claiming in its own comment to cover everything,
+  // which left the analysis stopping for a prompt on `get_chart_image`
+  // and `list_watches` — pure reads — in the middle of a live session.
+  //
+  // The mutating tools are deliberately left unannotated. Marking
+  // `register_watch` read-only would be a lie told to the one caller
+  // whose confirmation actually matters.
+  const annotate = (tool) =>
+    MUTATING_TOOLS.has(tool?.name)
+      ? tool
+      : { ...tool, annotations: { ...(tool.annotations || {}), readOnlyHint: true } };
+
+  const custom = CONFIG.mcpReadOnly
+    ? CUSTOM_TOOLS.filter((tool) => !MUTATING_TOOLS.has(tool.name))
+    : CUSTOM_TOOLS;
+  return [...native, ...custom].map(annotate);
 }
 
 function jsonRpcError(res, id, code, message) {
@@ -4689,6 +4727,19 @@ async function handleMcpRequest(req, res) {
     const name = body.params?.name;
     const args = body.params?.arguments || {};
     if (CUSTOM_TOOL_NAMES.has(name)) {
+      // Hiding a tool from tools/list is not the same as refusing it: a
+      // client that remembers the name from an earlier session would
+      // still call it.
+      if (CONFIG.mcpReadOnly && MUTATING_TOOLS.has(name)) {
+        jsonRpcError(
+          res,
+          id,
+          -32601,
+          `${name} is unavailable: the monitor is in read-only mode (MCP_READ_ONLY). ` +
+            `Setups reach it through the paste page instead.`,
+        );
+        return;
+      }
       try {
         res.json({ jsonrpc: "2.0", id, result: await handleCustomTool(name, args) });
       } catch (error) {
