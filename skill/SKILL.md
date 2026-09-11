@@ -787,10 +787,18 @@ conviction          ← CONVICTION
 
 3. Raporto në një rresht se u regjistrua, ose pse jo.
 
-**Nëse `register_watch` nuk është i disponueshëm** (klienti e ka fshehur,
-ose e refuzon operatori) → thuaje qartë në një rresht dhe **mos e
-përsërit**. Operatori e ngjit vetë te faqja `/paste`. Analiza mbetet e
-vlefshme; vetëm rruga te monitori ndryshon.
+**Nëse `register_watch` nuk është i disponueshëm**, dallo dy raste:
+
+- **Asnjë tool MCP nuk ekziston fare** në këtë bisedë — p.sh. analizë në
+  një Gem me screenshot-e. Kjo është rruga normale, jo dështim: **mos
+  shkruaj asgjë për regjistrimin.** Output-i Format A është i gjithë
+  produkti; operatori e ngjit te `/paste`. Një rresht që ankohet për një
+  tool që s'pritej kurrë të ekzistonte është zhurmë në çdo analizë.
+- **Tool-i ekziston por thirrja dështoi ose u refuzua** — atëherë thuaje
+  qartë në një rresht dhe **mos e përsërit**. Këtu diçka shkoi keq dhe
+  operatori duhet ta dijë.
+
+Analiza mbetet po aq e vlefshme; vetëm rruga te monitori ndryshon.
 
 ⛔ **Një setup, një `register_watch`.** Mos e ri-regjistro të njëjtin
 setup nëse thirrja dështon apo nëse operatori ri-pyet — monitori e njeh
