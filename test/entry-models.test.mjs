@@ -25,6 +25,7 @@ import {
   validateKillSwitchInput,
 } from "../lib/kill-switch.mjs";
 import { validateWatchInput } from "../lib/core.mjs";
+import { parseSetupText } from "../lib/parse-setup.mjs";
 
 const bar = (timestampMs, open, high, low, close) => ({ open, high, low, close, timestampMs });
 const BASE = Date.parse("2026-09-09T13:00:00Z"); // a Wednesday, 09:00 NY
@@ -151,6 +152,71 @@ test("EM8 — a session window withholds before it opens and invalidates after i
   const after = evaluateModelGate(sb, { nowMs: Date.parse("2026-09-09T16:00:00Z") }); // 12:00 NY
   assert.equal(after.pass, false);
   assert.equal(after.expired, true, "the Silver Bullet declares its own window close an invalidation");
+});
+
+// A real MULTISNIPER07 v6.0 output, pasted verbatim. The operator does
+// not write these — Gemini does, and he pastes them whole — so the exact
+// shape it emits is the contract, not a shape anyone can be asked to
+// adjust. This test is the one that would have caught the window gate
+// refusing it.
+const REAL_PASTE = `🎯 ZERO FLOAT ENTRY
+INSTRUMENT: BTCUSD
+DREJTIMI: 📉 SHORT
+MODEL: 13 (Opening Range PM — First Presented FVG)
+HTF BIAS: BEARISH · Premium
+PDA: Bearish FVG (77366 - 77450) · Rank 1st
+
+🟢 ENTRY: 77408.00 — FVG CE (Consequent Encroachment)
+🔴 SL: 77550.00 — Anchor 77538 + buffer
+🎯 TP1: 77065.00 — Low Hanging Fruit (M1 SSL)
+🎯 TP2: 76814.00 — M5 SSL Target
+🎯 TP3: 76642.00 — HTF ERL (H1 Low)
+
+RR: 1:2.4 | CONVICTION: A
+INVALID: Body close mbi ekstremitetin e sipërm të FVG (77450)`;
+
+test("EM8b — a real pasted v6.0 setup registers whole, model and all", () => {
+  const { parsed } = parseSetupText(REAL_PASTE);
+  const watch = applyEntryModel(validateWatchInput(parsed), parsed);
+
+  assert.equal(watch.symbol, "BTCUSD");
+  assert.equal(watch.direction, "sell");
+  assert.equal(watch.entry, 77408);
+  assert.equal(watch.entry_zone_low, 77366);
+  assert.equal(watch.entry_zone_high, 77450);
+  assert.equal(watch.sl, 77550);
+  assert.equal(watch.invalidation, 77450);
+  assert.deepEqual([watch.tp1, watch.tp2, watch.tp3], [77065, 76814, 76642]);
+
+  // "13 (Opening Range PM — First Presented FVG)" — number and name agree.
+  assert.equal(watch.entry_model.number, 13);
+  assert.equal(watch.defence_profile, "rejection_displacement", "the model filled the blank");
+  assert.equal(watch.invalidation_rule, "body_close");
+});
+
+test("EM8c — an Opening Range setup is not withheld for being early", () => {
+  // This setup was issued at 13:41 NY, inside the PM Opening Range and
+  // before the 14:00 a strict reading of Model 13 wants. Its own declared
+  // invalidation is a price event — "thyerja e kufirit të kundërt të
+  // Opening Range" — so the clock is context, not a gate. Withholding it
+  // here would have cost nineteen minutes and probably the entry.
+  const model = entryModelByNumber(13);
+  const gate = evaluateModelGate(model, { nowMs: Date.parse("2026-09-10T17:41:00Z"), direction: "sell" });
+  assert.equal(gate.pass, true);
+  assert.equal(gate.expired, false);
+  assert.equal(gate.blockers.length, 0);
+  assert.match(gate.notes.join(" "), /nuk ka hapur ende/, "still reported, just not as a refusal");
+});
+
+test("EM8d — only the Silver Bullets hold a hard clock", () => {
+  // The rule: a window blocks exactly where the model's own Invalidation
+  // line names the window. That is §5.1's three windows and nothing else.
+  const hard = ENTRY_MODELS.filter((m) => m.policy.window && m.policy.windowMode === "HARD");
+  assert.deepEqual(hard.map((m) => m.number), [6, 7, 8]);
+  for (const model of hard) assert.match(model.invalidation, /dritares kohore/);
+  for (const model of ENTRY_MODELS.filter((m) => m.policy.window && m.policy.windowMode !== "HARD")) {
+    assert.doesNotMatch(model.invalidation, /dritares kohore/, `model ${model.number}`);
+  }
 });
 
 test("EM9 — a model with no window never blocks and never expires", () => {

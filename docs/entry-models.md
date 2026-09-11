@@ -22,11 +22,37 @@ varet nga *kur mbërrin çmimi*:
 |---|---|---|
 | `tradable` | regjistrim | Model 16 = PASS, refuzohet në derë |
 | `directions` | regjistrim | Model 2 vetëm LONG, Model 11 vetëm SHORT |
-| `window` | çdo tik | dritarja e sesionit NY — mban hyrjen jashtë saj |
-| `days` | çdo tik | dita e javës (vetëm Model 3) |
+| `window` | çdo tik | dritarja e sesionit NY — **bllokon vetëm te Silver Bullet** |
+| `days` | çdo tik | dita e javës (vetëm Model 3) — këshilluese |
 | `defence` | regjistrim | mbush `defence_profile` vetëm nëse analisti nuk e deklaroi |
 | `invalidationRule` | regjistrim | `body_close` vs `touch`, po ashtu vetëm si default |
 | `timeStopBars` | pas hyrjes | sa qirinj M5 ka setup-i për të nisur punën |
+
+### Ora bllokon vetëm te Silver Bullet
+
+Një dritare është portë **vetëm kur vetë Invalidation-i i modelit e emëron
+orën**. Kjo është vetëm 6, 7 dhe 8 — Silver Bullet-ët — ku §5.1 e bën orën
+vetë modelin dhe rreshti Invalidation e thotë hapur: *"mbyllja e dritares
+kohore"*. Çdo model tjetër ka si invalidim një ngjarje çmimi, ndaj ora e tij
+është **kontekst, jo portë**: raportohet si shënim te mesazhi i hyrjes, nuk
+refuzon asgjë.
+
+Kjo nuk është zbutje. Një setup real erdhi me `MODEL: 13 (Opening Range PM)`
+në orën **13:41 NY** — brenda PM Opening Range, para orës 14:00 që e kërkon
+leximi i rreptë i modelit. Një dritare e fortë do ta kishte mbajtur atë hyrje
+19 minuta dhe ndoshta përgjithmonë, ndërkohë që invalidimi i deklaruar i atij
+setup-i është *"thyerja e kufirit të kundërt të Opening Range"* dhe nuk ka
+fare lidhje me orën.
+
+**Një portë që refuzon hyrje të vlefshme është më keq se asnjë portë** —
+dështon në heshtje, në drejtim të mosbërjes, e vetmja lloj dështimi që
+operatori nuk e sheh.
+
+| Modeli | Ora |
+|---|---|
+| 6, 7, 8 Silver Bullet | **portë** — jashtë saj nuk hyhet, mbyllja e saj = invalidim |
+| 3, 12, 13, 14, 18 | shënim — raportohet, nuk bllokon |
+| të tjerët | s'kanë orar |
 
 Dy refuzime ndodhin në regjistrim sepse **nuk mund të bëhen kurrë të
 vërteta më vonë**. Gjithçka tjetër është portë e gjallë: e mban hyrjen sa
@@ -66,7 +92,7 @@ shkroi. Boti e monitoron setup-in pa politikë modeli dhe nuk gënjen.
 |---|---|---|---|---|---|
 | 1 | ICT 2022 Model | FVG pas sweep SSL/BSL + BOS në LTF | trup mbyllet brenda FVG | trup jashtë ekstremit të strukturës | body_close · 18 qirinj |
 | 2 | Market Anchor | sweep ATH + Inversion FVG | trupi brenda anchor-it | trup thyen anchor-in | **vetëm LONG** · body_close |
-| 3 | Model 2 Amplified | Mar/Mër 06:00 NY, PDA mujore/javore | rejection me wick në PDA | thyerje e plotë e PDA javore | Mar/Mër · 06:00–10:00 · rejection+displacement |
+| 3 | Model 2 Amplified | Mar/Mër 06:00 NY, PDA mujore/javore | rejection me wick në PDA | thyerje e plotë e PDA javore | Mar/Mër · 06:00–10:00 *(shënim)* · rejection+displacement |
 | 4 | Turtle Soup | sweep i Old H/L + largim i shpejtë | qiri displacement i kundërt | vazhdim pa kthim | rejection+displacement · 9 qirinj |
 | 5 | Turtle Soup Deferred | retest i PDA pas stop hunt | wick brenda PDA, trup jashtë | trup mbyllet brenda PDA | rejection+displacement · body_close |
 | 6 | Silver Bullet London | FVG brenda 03:00–04:00 NY | BMS paraprak + FVG e paprekur | mbyllja e dritares ose thyerje e FVG | **dritarja e mbyllur = invalidim** · 6 qirinj |
@@ -75,9 +101,9 @@ shkroi. Boti e monitoron setup-in pa politikë modeli dhe nuk gënjen.
 | 9 | OTE | pas BOS, tërheqje 0.618–0.79 | rejection në Fibo + zbehje volumi | kalim i 0.79/1.0 | rejection+displacement |
 | 10 | IOFED | FVG e re brenda FVG-së origjinale | 50% CE e FVG-së së brendshme | thyerje e kufirit të jashtëm | body_close |
 | 11 | Smart Money 3-Stage (ATH) | 3 faza shpërndarjeje në ATH | asnjë trup mbi CE | trup mbyllet mbi CE | **vetëm SHORT** · body_close |
-| 12 | Opening Range FPFVG (AM) | FVG e parë pas OR 07:00–07:30 | displacement i qartë | thyerje e kufirit të kundërt të OR | 07:30–12:00 · rejection+displacement |
-| 13 | Opening Range FPFVG (PM) | FVG e parë pas OR 13:30–14:00 | displacement i qartë | njësoj | 14:00–16:00 · rejection+displacement |
-| 14 | NY Lunch Macro → PM | pas 13:00, target i identifikuar në 10:00 | FVG në PM drejt targetit | targeti mblidhet, çmimi konsolidon | 13:00–16:00 |
+| 12 | Opening Range FPFVG (AM) | FVG e parë pas OR 07:00–07:30 | displacement i qartë | thyerje e kufirit të kundërt të OR | 07:30–12:00 *(shënim)* · rejection+displacement |
+| 13 | Opening Range FPFVG (PM) | FVG e parë pas OR 13:30–14:00 | displacement i qartë | njësoj | 14:00–16:00 *(shënim)* · rejection+displacement |
+| 14 | NY Lunch Macro → PM | pas 13:00, target i identifikuar në 10:00 | FVG në PM drejt targetit | targeti mblidhet, çmimi konsolidon | 13:00–16:00 *(shënim)* |
 | 15 | Low Resistance Liquidity Run | BSL/SSL e marrë, rrugë e pastër | mungesë opozite pranë | shfaqet PDA e fortë kundërshtare | 18 qirinj |
 | 16 | High Resistance Conditions | sinjale kontradiktore | **NUK KA ENTRY — PASS** | N/A | **refuzohet në regjistrim** |
 | 17 | Venom | SIBI (fang 1) → BISI (fang 2) | entry ≤ mbylljes së BISI | BISI dështon ta mbajë çmimin | rejection+displacement · body_close |
