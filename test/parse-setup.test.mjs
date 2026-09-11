@@ -477,3 +477,57 @@ test("PS30 — the warning names the block the zone actually came from", () => {
     `expected a PDA-sourced zone warning, got: ${warnings.join(" | ")}`,
   );
 });
+
+// The analysis's own ratio names its objective when no DOL line does.
+//
+// A real Silver Bullet paste: TP1 is 1.06R and TP3 is 2.88R, and the
+// analysis declares 1:2.8. Judged against TP1, the engine's acceptance
+// requirement leaves 0.53R at the fill against a 0.5R floor — a setup
+// rated CONVICTION A, refused for decaying against a target its own
+// author labelled "Low Hanging Fruit".
+test("PS-RR1 — a declared ratio picks the target it actually matches", () => {
+  const { parsed, warnings } = parseSetupText(`INSTRUMENT: XAUUSD
+DREJTIMI: SHORT
+MODEL: 7 — Silver Bullet (10-11 AM)
+ENTRY: 4361.50
+SL: 4378.00
+TP1: 4344.00 — Low Hanging Fruit
+TP2: 4330.00
+TP3: 4314.00 — DOL Final
+RR: 1:2.8 | CONVICTION: A`);
+  assert.equal(parsed.rr_target, "tp3");
+  assert.match(warnings.join(" "), /measured to TP3/);
+});
+
+test("PS-RR2 — a ratio that already matches TP1 changes nothing", () => {
+  const { parsed } = parseSetupText(`INSTRUMENT: BTCUSD
+DREJTIMI: SHORT
+ENTRY: 77408
+SL: 77550
+TP1: 77065
+TP2: 76814
+TP3: 76642
+RR: 1:2.4`);
+  assert.equal(parsed.rr_target, "tp1", "TP1 is 2.42R — the declared 2.4 means TP1");
+});
+
+test("PS-RR3 — the DOL line still wins, and a ratio matching nothing is ignored", () => {
+  const withDol = parseSetupText(`INSTRUMENT: XAUUSD
+DREJTIMI: SHORT
+DOL: 4330.00
+ENTRY: 4361.50
+SL: 4378.00
+TP1: 4344.00
+TP2: 4330.00
+TP3: 4314.00
+RR: 1:2.8`);
+  assert.equal(withDol.parsed.rr_target, "tp2", "the declared DOL is TP2, whatever the ratio says");
+
+  const nonsense = parseSetupText(`INSTRUMENT: XAUUSD
+DREJTIMI: SHORT
+ENTRY: 4361.50
+SL: 4378.00
+TP1: 4344.00
+RR: 1:9`);
+  assert.equal(nonsense.parsed.rr_target, null, "9R matches no target; TP1 stays the default");
+});

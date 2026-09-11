@@ -25,6 +25,7 @@ import {
   validateKillSwitchInput,
 } from "../lib/kill-switch.mjs";
 import { validateWatchInput } from "../lib/core.mjs";
+import { parseSetupText } from "../lib/parse-setup.mjs";
 
 const bar = (timestampMs, open, high, low, close) => ({ open, high, low, close, timestampMs });
 const BASE = Date.parse("2026-09-09T13:00:00Z"); // a Wednesday, 09:00 NY
@@ -32,10 +33,14 @@ const setup = (over = {}) => ({ symbol: "XAUUSD", direction: "buy", entry: 4414,
 
 // --- the catalogue ----------------------------------------------------------
 
-test("EM1 — all 22 models are present, numbered 1..22, with unique keys", () => {
-  assert.equal(ENTRY_MODELS.length, 22);
-  assert.deepEqual(ENTRY_MODELS.map((m) => m.number), Array.from({ length: 22 }, (_, i) => i + 1));
-  assert.equal(new Set(ENTRY_MODELS.map((m) => m.key)).size, 22);
+test("EM1 — all 35 models are present, numbered 1..35, with unique keys", () => {
+  // 1-22 are the v6.0 prompt's catalogue; 23-35 are the repo's older
+  // 19-model list, carried across rather than renumbered or dropped.
+  assert.equal(ENTRY_MODELS.length, 35);
+  assert.deepEqual(ENTRY_MODELS.map((m) => m.number), Array.from({ length: 35 }, (_, i) => i + 1));
+  assert.equal(new Set(ENTRY_MODELS.map((m) => m.key)).size, 35);
+  assert.equal(ENTRY_MODELS.filter((m) => m.catalogue === "v6.0").length, 22);
+  assert.equal(ENTRY_MODELS.filter((m) => m.catalogue === "hybrid-v7.2").length, 13);
   for (const model of ENTRY_MODELS) {
     for (const field of ["trigger", "validation", "invalidation"]) {
       assert.ok(model[field]?.length > 10, `model ${model.number} has a ${field}`);
@@ -64,6 +69,51 @@ test("EM4 — an unrecognised name resolves to nothing and is not an error", () 
   const applied = applyEntryModel(validateWatchInput(setup({ setup_model: "diçka tjetër" })), {});
   assert.equal(applied.entry_model, null);
   assert.equal(applied.defence_profile, "standard", "an unknown model changes no default");
+});
+
+test("EM3b — every model the older list had is still reachable by name", () => {
+  const legacy = {
+    "OB + FVG Confluence": 23,
+    Unicorn: 24,
+    RIFVG: 25,
+    "MMXM / MMBM": 26,
+    "BISI / SIBI": 27,
+    "Vault Pocket": 28,
+    SDR: 29,
+    DRO: 30,
+    LSS: 31,
+    OSST: 32,
+    STRC: 33,
+    SRT: 34,
+    FBE: 35,
+  };
+  for (const [name, number] of Object.entries(legacy)) {
+    assert.equal(resolveEntryModel(name)?.model.number, number, `${name} resolves`);
+  }
+});
+
+test("EM3c — when a number and a name disagree, the name wins", () => {
+  // The two catalogues agree on 1-3 and diverge after: "Model 5" is
+  // Turtle Soup Deferred in v6.0 and plain Turtle Soup in the old list.
+  // A name never collides that way, so it decides.
+  const resolved = resolveEntryModel("Model 5 — Turtle Soup");
+  assert.equal(resolved.model.number, 4);
+  assert.match(resolved.matchedBy, /number 5 disagreed/);
+
+  // A bare number still resolves, against the v6.0 numbering the
+  // analysis prompt actually writes to.
+  assert.equal(resolveEntryModel("Model 5").model.number, 5);
+});
+
+test("EM3d — a family name with no window resolves to nothing, never to a guess", () => {
+  // Three Silver Bullets, three different hours. Picking one would
+  // monitor the setup against an hour the analyst never named.
+  assert.equal(resolveEntryModel("Silver Bullet"), null);
+  assert.equal(resolveEntryModel("Modeli 4 — Silver Bullet"), null, "the number does not break the tie either");
+  assert.equal(resolveEntryModel("Opening Range"), null);
+  // Say which, and it resolves.
+  assert.equal(resolveEntryModel("Silver Bullet AM").model.number, 7);
+  assert.equal(resolveEntryModel("Opening Range PM").model.number, 13);
 });
 
 test("EM5 — Model 16 is a filter: registering it is refused outright", () => {
@@ -102,6 +152,71 @@ test("EM8 — a session window withholds before it opens and invalidates after i
   const after = evaluateModelGate(sb, { nowMs: Date.parse("2026-09-09T16:00:00Z") }); // 12:00 NY
   assert.equal(after.pass, false);
   assert.equal(after.expired, true, "the Silver Bullet declares its own window close an invalidation");
+});
+
+// A real MULTISNIPER07 v6.0 output, pasted verbatim. The operator does
+// not write these — Gemini does, and he pastes them whole — so the exact
+// shape it emits is the contract, not a shape anyone can be asked to
+// adjust. This test is the one that would have caught the window gate
+// refusing it.
+const REAL_PASTE = `🎯 ZERO FLOAT ENTRY
+INSTRUMENT: BTCUSD
+DREJTIMI: 📉 SHORT
+MODEL: 13 (Opening Range PM — First Presented FVG)
+HTF BIAS: BEARISH · Premium
+PDA: Bearish FVG (77366 - 77450) · Rank 1st
+
+🟢 ENTRY: 77408.00 — FVG CE (Consequent Encroachment)
+🔴 SL: 77550.00 — Anchor 77538 + buffer
+🎯 TP1: 77065.00 — Low Hanging Fruit (M1 SSL)
+🎯 TP2: 76814.00 — M5 SSL Target
+🎯 TP3: 76642.00 — HTF ERL (H1 Low)
+
+RR: 1:2.4 | CONVICTION: A
+INVALID: Body close mbi ekstremitetin e sipërm të FVG (77450)`;
+
+test("EM8b — a real pasted v6.0 setup registers whole, model and all", () => {
+  const { parsed } = parseSetupText(REAL_PASTE);
+  const watch = applyEntryModel(validateWatchInput(parsed), parsed);
+
+  assert.equal(watch.symbol, "BTCUSD");
+  assert.equal(watch.direction, "sell");
+  assert.equal(watch.entry, 77408);
+  assert.equal(watch.entry_zone_low, 77366);
+  assert.equal(watch.entry_zone_high, 77450);
+  assert.equal(watch.sl, 77550);
+  assert.equal(watch.invalidation, 77450);
+  assert.deepEqual([watch.tp1, watch.tp2, watch.tp3], [77065, 76814, 76642]);
+
+  // "13 (Opening Range PM — First Presented FVG)" — number and name agree.
+  assert.equal(watch.entry_model.number, 13);
+  assert.equal(watch.defence_profile, "rejection_displacement", "the model filled the blank");
+  assert.equal(watch.invalidation_rule, "body_close");
+});
+
+test("EM8c — an Opening Range setup is not withheld for being early", () => {
+  // This setup was issued at 13:41 NY, inside the PM Opening Range and
+  // before the 14:00 a strict reading of Model 13 wants. Its own declared
+  // invalidation is a price event — "thyerja e kufirit të kundërt të
+  // Opening Range" — so the clock is context, not a gate. Withholding it
+  // here would have cost nineteen minutes and probably the entry.
+  const model = entryModelByNumber(13);
+  const gate = evaluateModelGate(model, { nowMs: Date.parse("2026-09-10T17:41:00Z"), direction: "sell" });
+  assert.equal(gate.pass, true);
+  assert.equal(gate.expired, false);
+  assert.equal(gate.blockers.length, 0);
+  assert.match(gate.notes.join(" "), /nuk ka hapur ende/, "still reported, just not as a refusal");
+});
+
+test("EM8d — only the Silver Bullets hold a hard clock", () => {
+  // The rule: a window blocks exactly where the model's own Invalidation
+  // line names the window. That is §5.1's three windows and nothing else.
+  const hard = ENTRY_MODELS.filter((m) => m.policy.window && m.policy.windowMode === "HARD");
+  assert.deepEqual(hard.map((m) => m.number), [6, 7, 8]);
+  for (const model of hard) assert.match(model.invalidation, /dritares kohore/);
+  for (const model of ENTRY_MODELS.filter((m) => m.policy.window && m.policy.windowMode !== "HARD")) {
+    assert.doesNotMatch(model.invalidation, /dritares kohore/, `model ${model.number}`);
+  }
 });
 
 test("EM9 — a model with no window never blocks and never expires", () => {
