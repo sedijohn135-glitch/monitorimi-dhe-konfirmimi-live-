@@ -13,5 +13,7 @@ RREGULLA TË FORTA:
 4. Përdor **ruflo** kur ke nevojë për planifikim më kompleks.
 5. Mos i harxhosh tokens duke bërë gjithçka manualisht. Gjithmonë prefero skills-et e pluginsave.
 6. Unë nuk di kod. Prandaj ti duhet të zgjedhësh dhe të përdorësh skills-et automatikisht, pa ma kërkuar mua.
+7. **Auto-merge.** Pas çdo ndryshimi bëj vetë commit → push → PR → **merge**, pa pritur që unë ta them. Mos e lër PR-në draft duke pritur miratimin tim.
+   Kusht i vetëm përpara merge-it: `npm test` dhe `npm run smoke` të kalojnë të gjitha, dhe PR-ja të jetë pa konflikt. Nëse ndonjë provë dështon, mos e bëj merge — rregulloje ose më thuaj çfarë bllokoi.
 
 Çdo herë që fillon punë, vepro sipas këtyre rregullave.
