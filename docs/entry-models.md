@@ -144,8 +144,8 @@ trade që nuk ekziston më:
 |---|---|---|
 | PENDING_ENTRY | `READY_FOR_ENTRY` → `ENTRY_TOUCHED` | "CONFIRMED — WAIT FOR THE ZONE" |
 | ACTIVE_TRADE | `REJECTION_DETECTED` → `M5_MSS_CONFIRMED` → `DISPLACEMENT_CONFIRMED` → `ENTRY_CONFIRMED` | **🚨 HYR TANI** + modeli, validimi, invalidimi |
-| TP1 / BE | `TP1` në regjistrimin e trade-it | **✅ TP1 ARDHI** + urdhri për Break-Even |
-| TP2 / TP3 | `TP2` / `TP3` | **🎯 TP2 ARDHI** |
+| TP1 / BE | `TP1` në regjistrimin e trade-it | **✅ TP1 U KAP ME SUKSES** + urdhri për Break-Even |
+| TP2 / TP3 | `TP2` / `TP3` | **🎯 TP2 U KAP** |
 | SL / INVALID | `TRADE_STOPPED` · `INVALIDATED` · `EXPIRED` | **❌ SL HIT** (ose BREAK-EVEN STOP) |
 
 **TP1 → Break-Even:** monitori zhvendos vetë `sl` te `entry` dhe e ruan të

@@ -2615,8 +2615,8 @@ async function tickTradeWatch(trade) {
     }
     notify(
       (target.name === "TP1"
-        ? `<b>✅ TP1 ARDHI!</b>\n`
-        : `<b>🎯 ${htmlEscape(target.name)} ARDHI — target institucional</b>\n`) +
+        ? `<b>✅ TP1 U KAP ME SUKSES!</b>\n`
+        : `<b>🎯 ${htmlEscape(target.name)} U KAP — target institucional</b>\n`) +
         `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(directionLabel(trade))}\n` +
         `<b>Level:</b> ${htmlEscape(formatLevel(target.level))} | ` +
         `<b>Price:</b> ${htmlEscape(formatLevel(progress.price))}\n` +
