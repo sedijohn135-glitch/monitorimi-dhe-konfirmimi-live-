@@ -4621,8 +4621,8 @@ async function getUpstreamTools(force = false) {
  * decides what `MCP_READ_ONLY` hides.
  *
  * It is listed by hand rather than inferred, because being wrong in the
- * permissive direction here means telling a client that `register_watch`
- * — which can arm a trade — is safe to call unattended.
+ * permissive direction here means handing an analysis session an operator
+ * control — cancelling a watch, or arming auto-trade — as if it were a read.
  */
 const MUTATING_TOOLS = new Set([
   "register_watch",
@@ -4655,26 +4655,27 @@ async function mergedToolList() {
   // which left the analysis stopping for a prompt on `get_chart_image`
   // and `list_watches` — pure reads — in the middle of a live session.
   //
-  // The mutating tools are deliberately left unannotated. Marking
-  // `register_watch` read-only would be a lie told to the one caller
-  // whose confirmation actually matters.
-  // `register_watch` gets the truth about itself, which it never had.
+  // `register_watch` is the one tool here that writes, and the last pass
+  // marked it `readOnlyHint: false` on the principle that the caller
+  // whose confirmation matters should be told the truth. In practice the
+  // client that receives it is Gemini Spark, and its confirmation is not
+  // a pause — the prompt renders in the Gemini app while the browser
+  // session that made the call sits in loading forever. The operator
+  // never sees it. So the "honest" hint did not buy a considered yes; it
+  // bought a hung analysis and a setup that never reached the monitor.
   //
-  // A client decides whether to confirm from these hints, and the two
-  // that matter here were never set — so both took their spec defaults:
-  // `destructiveHint` defaults to TRUE and `idempotentHint` to FALSE.
-  // The tool was being described as a destructive, non-repeatable write
-  // by omission, which is why it prompted every time.
+  // What the call actually does with auto-trade disarmed: creates a watch
+  // and sends a Telegram message. Nothing is destroyed, nothing is
+  // overwritten, and calling it twice with the same setup returns the
+  // first watch — `createSetupWatch` dedupes on `watchKey` before it adds
+  // anything. The worst outcome of an unattended call is a setup put in
+  // front of a human, who then decides in Telegram. That is a write the
+  // client may make without asking.
   //
-  // What it actually does: creates a watch and sends a Telegram message.
-  // Nothing is destroyed, nothing is overwritten, and calling it twice
-  // with the same setup returns the first watch — `createSetupWatch`
-  // dedupes on `watchKey` before it adds anything.
-  //
-  // Except when auto-trade is armed. Then the monitor's own loop can turn
-  // that watch into a real order, and the call really can move money. So
-  // the hint is computed per request rather than fixed: honest in both
-  // states, and the prompt comes back exactly when it should.
+  // When auto-trade IS armed the monitor's own loop can turn that watch
+  // into a real order, and the call can move money. Then the hints tell
+  // the truth and the prompt comes back — which is exactly the state in
+  // which a prompt is worth a hung browser.
   const armed = autoTradeStatus().armed === true;
   const annotate = (tool) => {
     if (!MUTATING_TOOLS.has(tool?.name)) {
@@ -4685,7 +4686,7 @@ async function mergedToolList() {
       ...tool,
       annotations: {
         ...(tool.annotations || {}),
-        readOnlyHint: false,
+        readOnlyHint: !armed,
         destructiveHint: armed,
         idempotentHint: true,
       },
