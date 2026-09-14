@@ -317,8 +317,19 @@ const waitFor = async (predicate, budgetMs, step = 1500) => {
 await sleep(1500);
 
 console.log("\n— the boundary is unchanged —");
-const tools = (await rpc("tools/list", {})).result.tools.map((tool) => tool.name);
+const toolList = (await rpc("tools/list", {})).result.tools;
+const tools = toolList.map((tool) => tool.name);
 assert(!tools.includes("create_order"), "the order tool is still hidden from the client");
+
+// With auto-trade disarmed `register_watch` is annotated read-only so the
+// client registers the setup without stopping for a confirmation nobody
+// sees. Armed, the same call can become a real order — so the hint has to
+// flip back here, and the client has to ask.
+const registerHints = toolList.find((tool) => tool.name === "register_watch")?.annotations || {};
+assert(
+  registerHints.readOnlyHint === false && registerHints.destructiveHint === true,
+  `armed, register_watch asks for confirmation (${JSON.stringify(registerHints)})`,
+);
 assert(!tools.includes("get_positions"), "account tools are still hidden from the client");
 assert(tools.includes("get_trendbars"), "market data is still exposed");
 const blocked = await rpc("tools/call", { name: "create_order", arguments: { volume: 1 } });
