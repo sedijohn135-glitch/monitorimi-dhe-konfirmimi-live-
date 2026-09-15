@@ -270,14 +270,14 @@ for pool in liquidity_registry:
         alerts.append(result["alert_id"])
 ```
 
-### 3.2 · Order Registration (Opsionale, OFF by Default)
+### 3.2 · Watch Registration (ON by Default)
 
-⛔ **Default i sigurt: OFF.** Aktivizo vetëm nëse përdoruesi e konfirmon.
+✅ **Default: ON.** Çdo output Format A me Zero Float Entry regjistrohet vetë — shih §15.5b te SKILL.md.
 
 ```yaml
 # mcp_config.yaml
 registration:
-  auto_register_setups: false   # ⛔ MBANI OFF
+  auto_register_setups: true    # ✅ regjistrimi = monitorim, jo urdhër
   auto_register_alerts: true    # ✅ alerts janë të sigurt
   register_on_conviction:
     - "A"                        # vetëm A+ setups
@@ -286,7 +286,11 @@ registration:
   max_daily_loss_pct: 5.0
 ```
 
-**Arsyeja OFF:** Analiza ICT/SMC ka risk të lartë gabimi. Auto-register pa konfirmim njeriu = rrezik humbjeje kapitali.
+**Pse ON:** `register_watch` **nuk vendos urdhër**. Ai krijon një watch: monitori ndjek çmimin, pret mbrojtjen që kërkon vetë setup-i, dhe dërgon një mesazh në Telegram. Vendimi për të hyrë mbetet te operatori, në Telegram.
+
+Ky flag dikur ishte OFF sepse regjistrimi dhe ekzekutimi trajtoheshin si e njëjta gjë. Nuk janë. Porta që mbron kapitalin është **`AUTO_TRADE_ENABLED` te vetë monitori** — e ndarë, në server, dhe e pacaktueshme nga ky skill. Sa kohë ajo është e çarmatosur, një regjistrim nuk mund të lëvizë asnjë qindarkë.
+
+⛔ **Rreziku i vërtetë është i kundërti:** një analizë që mbetet tekst nuk monitorohet nga askush. Çmimi lëviz ndërsa operatori kopjon e ngjit, dhe dritarja e hyrjes mbyllet.
 
 ---
 
@@ -395,7 +399,7 @@ Nëse ndonjë mjet MCP nuk disponohet:
 | `watch.*` | Kalo në polling fallback | 🟢 I ulët |
 | `trap.watch.*` | Kalo në polling fallback | 🟢 I ulët |
 | `register.alert` | Hiq alerts, përdor vetëm console | 🟢 I ulët |
-| `register.order` | ⛔ Mos aktivizo auto-register | ⛔ Siguri |
+| `register.order` | ⛔ Kurrë mos vendos urdhër vetë — kjo është tjetër gjë nga `register_watch` | ⛔ Siguri |
 
 ---
 
