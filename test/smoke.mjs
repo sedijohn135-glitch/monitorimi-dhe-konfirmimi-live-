@@ -150,6 +150,7 @@ const env = {
   WATCH_MONITOR_AUTH_TOKEN: "secret",
   TELEGRAM_BOT_TOKEN: "x",
   TELEGRAM_CHAT_ID: "1",
+  TELEGRAM_API_BASE: "http://127.0.0.1:9802",
   SCHEDULER_TICK_MS: "1000",
   WATCH_INTERVAL_MS: "3000",
   MIN_CONFIRMATION_HOLD_MS: "0",
@@ -161,10 +162,8 @@ const env = {
   NEWS_FILTER_ENABLED: "false",
 };
 
-// Redirect Telegram at the fake by overriding fetch through an env-driven
-// shim is not possible without touching the source, so the fake telegram
-// exists only to prove the outbox does not throw; delivery failures are
-// expected and asserted as *recorded*, never as lost.
+// TELEGRAM_API_BASE points the notifier at the fake above, so this suite
+// reads the operator's actual messages rather than asserting around them.
 
 function boot() {
   const child = spawn(process.execPath, ["index.js"], { env, stdio: ["ignore", "pipe", "pipe"] });
@@ -251,6 +250,8 @@ const registered = await rpc("tools/call", {
     entry: 4414.5,
     sl: 4400,
     tp1: 4450,
+    tp2: 4480,
+    tp3: 4520,
   },
 });
 const watchId = JSON.parse(registered.result.content[0].text).watch_id;
@@ -265,6 +266,8 @@ const duplicate = await rpc("tools/call", {
     entry: 4414.5,
     sl: 4400,
     tp1: 4450,
+    tp2: 4480,
+    tp3: 4520,
   },
 });
 assert(
@@ -295,6 +298,21 @@ assert(
 assert(
   live.lifecycle === "TOUCHED" || live.lifecycle === "CONFIRMING",
   `lifecycle advanced past ARMED (${live.lifecycle})`,
+);
+
+// Telegram is the operator's only durable record of the trade: the analysis
+// window that produced the setup routinely freezes before it finishes
+// printing. A message that names TP1 and stops leaves him holding a
+// position with nowhere to take it.
+const withTargets = received.filter(
+  (text) => typeof text === "string" && text.includes("TP2:") && text.includes("TP3:"),
+);
+assert(
+  withTargets.length > 0,
+  `the notifications carry TP2 and TP3, not TP1 alone (${received.length} message(s) seen)`,
+);
+console.log(
+  `       ${(withTargets[0].match(/SL:.*/) || [""])[0].replace(/<[^>]+>/g, "")}`,
 );
 
 console.log("\n— restart recovery —");

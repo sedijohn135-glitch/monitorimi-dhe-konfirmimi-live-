@@ -596,6 +596,7 @@ const notifier = new Notifier({
   token: process.env.TELEGRAM_BOT_TOKEN,
   chatId: process.env.TELEGRAM_CHAT_ID,
   log,
+  ...(process.env.TELEGRAM_API_BASE ? { apiBase: process.env.TELEGRAM_API_BASE } : {}),
 });
 const store = new WatchStore({
   path: CONFIG.statePath,
@@ -883,6 +884,29 @@ function qualityLine(watch) {
   return parts.length ? `<b>Kualiteti:</b> ${htmlEscape(parts.join(" · "))}\n` : "";
 }
 
+/**
+ * The stop and every target the setup registered, on one line.
+ *
+ * It used to print TP1 alone. TP2 and TP3 were registered, carried through
+ * the whole lifecycle, and quoted by the R:R line — but never shown. That
+ * was survivable only while the operator could read them off the analysis
+ * window. He cannot: the window freezes mid-answer often enough that
+ * Telegram is his only record of where the trade is going. A confirmation
+ * he cannot act on past the first partial is half a confirmation.
+ */
+function levelsLine(watch) {
+  return (
+    `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))}` +
+    [watch.tp1, watch.tp2, watch.tp3]
+      .map((level, index) =>
+        level === null || level === undefined
+          ? ""
+          : ` | <b>TP${index + 1}:</b> ${htmlEscape(formatLevel(level))}`,
+      )
+      .join("")
+  );
+}
+
 function modelLines(watch) {
   const model = watch.entry_model;
   if (!model) return "";
@@ -910,7 +934,7 @@ function confirmWatch(watch, price, result, gates) {
       modelLines(watch) +
       qualityLine(watch) +
       `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>Price:</b> ${htmlEscape(formatLevel(price))}\n` +
-      `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+      `${levelsLine(watch)}\n` +
       fillContractLines(watch.fillContract) +
       `<b>Evidence:</b> ${htmlEscape(result.signals.join(" + "))}\n` +
       `<b>Strength:</b> ${htmlEscape(result.strength)}\n` +
@@ -1030,7 +1054,7 @@ function confirmedNotExecutedWatch(watch, price, result, gates, refusal) {
       modelLines(watch) +
       qualityLine(watch) +
       `<b>Entry:</b> ${htmlEscape(formatLevel(watch.entry))} | <b>Price:</b> ${htmlEscape(formatLevel(price))}\n` +
-      `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+      `${levelsLine(watch)}\n` +
       `<b>Evidence:</b> ${htmlEscape(result.signals.join(" + "))}\n` +
       `<b>Auto-trade stood down:</b> ${htmlEscape(refusal.reason)}\n` +
       (refusal.failures?.length
@@ -1059,7 +1083,7 @@ function executionUnknownWatch(watch, detail) {
       `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(watch.direction.toUpperCase())} ` +
       `${htmlEscape(String(watch.execution?.volume ?? "?"))} lot(s)\n` +
       `<b>Problem:</b> ${htmlEscape(detail)}\n` +
-      `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+      `${levelsLine(watch)}\n` +
       `<b>Action:</b> an order was sent and the monitor could not read back whether it filled. ` +
       `Check the account manually. This watch is no longer monitored.`,
     "critical",
@@ -1130,7 +1154,7 @@ function placementMessage(watch, placement, price) {
     `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(side)}\n` +
     `<b>Setup ID:</b> ${htmlEscape(watch.setup_id || watch.id)}\n` +
     `<b>Price now:</b> ${htmlEscape(formatLevel(price))} | <b>Analysed entry:</b> ${htmlEscape(formatLevel(watch.entry))} (zone ${htmlEscape(zone)})\n` +
-    `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+    `${levelsLine(watch)}\n` +
     body
   );
 }
@@ -1159,7 +1183,7 @@ function setupDegradedWatch(watch, reason, price, detail = {}) {
       `<b>Planned entry:</b> ${htmlEscape(formatLevel(watch.entry))}\n` +
       riskLine +
       rrLine +
-      `<b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+      `${levelsLine(watch)}\n` +
       `<i>The evidence arrived, but this fill is a different trade from the one ` +
       `that was analysed. Nothing was sent as an entry. Do not open it manually — ` +
       `re-run the analysis if you still want this market.</i>`,
@@ -4256,7 +4280,7 @@ async function handleCustomTool(name, args = {}) {
           (watch.entry_zone_low !== null
             ? ` (zone ${htmlEscape(formatLevel(watch.entry_zone_low))}–${htmlEscape(formatLevel(watch.entry_zone_high))})`
             : "") +
-          ` | <b>SL:</b> ${htmlEscape(formatLevel(watch.sl))} | <b>TP1:</b> ${htmlEscape(formatLevel(watch.tp1))}\n` +
+          ` | ${levelsLine(watch)}\n` +
           (watch.prerequisite
             ? `<b>Prerequisite:</b> ${htmlEscape(watch.prerequisite.timeframe)} ${htmlEscape(watch.prerequisite.rule)} beyond ${htmlEscape(formatLevel(watch.prerequisite.level))}\n`
             : "") +
