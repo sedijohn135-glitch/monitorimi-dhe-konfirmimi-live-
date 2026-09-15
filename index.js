@@ -95,6 +95,7 @@ import {
   evaluateAntiSl,
   evaluateConfirmation,
   evaluateEntryOpportunity,
+  opportunityEndsSetup,
   evaluatePrerequisite,
   evaluateSafety,
   evaluateTimeWindow,
@@ -1160,6 +1161,58 @@ function placementMessage(watch, placement, price) {
     `<b>Price now:</b> ${htmlEscape(formatLevel(price))} | <b>Analysed entry:</b> ${htmlEscape(formatLevel(watch.entry))} (zone ${htmlEscape(zone)})\n` +
     `${levelsLine(watch)}\n` +
     body
+  );
+}
+
+/**
+ * The entry is refused at THIS price, and the setup is still alive.
+ *
+ * The distinction this message exists to draw: `RR_COLLAPSED` is a fact
+ * about where price is standing, not about the setup. The analysed trade
+ * — its entry, its stop, its targets — is unchanged and still on the
+ * board. If price comes back to the zone the ratio comes back with it.
+ *
+ * Killing the watch here was wrong, and wrong in a way the code already
+ * knew: twenty lines further down, the placement branch says a spent move
+ * "is a reason not to enter now, never a reason to call a live setup
+ * finished". The ratio gate resolved the watch anyway, so which answer
+ * the operator got depended only on whether the evidence happened to
+ * complete before or after price wandered off.
+ *
+ * What still ends a setup is what always did: price through the stop, the
+ * thesis invalidated, or the entry window closing. Those have their own
+ * clocks. The ratio is not one of them.
+ */
+function opportunityWithheldMessage(watch, opportunity, price) {
+  const o = opportunity || {};
+  const rrLine =
+    Number.isFinite(o.remainingRR) && Number.isFinite(o.rrPlanned)
+      ? `<b>RR to ${htmlEscape(o.rrTarget ?? "TP1")}:</b> ${htmlEscape(o.remainingRR.toFixed(2))}R nga këtu vs ` +
+        `${htmlEscape(o.rrPlanned.toFixed(2))}R e analizuar (dyshemeja ${htmlEscape(String(CONFIG.entryMinRemainingRR))}R)\n`
+      : "";
+  const riskLine =
+    Number.isFinite(o.remainingRisk) && Number.isFinite(o.riskPlanned)
+      ? `<b>Rreziku:</b> ${htmlEscape(formatLevel(o.remainingRisk))} nga këtu vs ` +
+        `${htmlEscape(formatLevel(o.riskPlanned))} i planifikuar\n`
+      : "";
+  const zone =
+    watch.entry_zone_low !== null && watch.entry_zone_high !== null
+      ? `${formatLevel(watch.entry_zone_low)}–${formatLevel(watch.entry_zone_high)}`
+      : formatLevel(watch.entry);
+  return (
+    `<b>⏸ NUK HYHET NË KËTË ÇMIM — PRIT ZONËN</b>\n` +
+    `<b>${htmlEscape(watch.symbol)}</b> ${htmlEscape(directionLabel(watch))}\n` +
+    `<b>Setup ID:</b> ${htmlEscape(watch.setup_id || watch.id)}\n` +
+    `<b>Çmimi tani:</b> ${htmlEscape(formatLevel(price))} | ` +
+    `<b>Hyrja e analizuar:</b> ${htmlEscape(formatLevel(watch.entry))} (zona ${htmlEscape(zone)})\n` +
+    riskLine +
+    rrLine +
+    `${levelsLine(watch)}\n` +
+    `<i>Evidenca erdhi, por çmimi iku nga zona dhe raporti nga këtu është nën dysheme. ` +
+    `Asgjë nuk kërkohet prej teje në treg tani.\n` +
+    `Setup-i NUK vdiq — vendos një limit te ${htmlEscape(formatLevel(watch.entry))} ose prit. ` +
+    `Watch-i vazhdon: nëse çmimi kthehet në zonë, raporti kthehet me të dhe do të marrësh HYR TANI. ` +
+    `Setup-i mbyllet vetëm nga stopi, invalidimi, ose mbyllja e dritares.</i>`
   );
 }
 
@@ -2280,15 +2333,48 @@ async function tickSetupWatch(watch) {
   // watch back off disk and has no opportunity object to be handed.
   watch.fillContract = fillContract(opportunity);
   if (!opportunity.actionable) {
-    watch.lastReason = "entry_opportunity_closed";
-    record(watch, "entry_missed", { reason: opportunity.reason, detail: opportunity.detail, price: mid }, now);
-    entryMissedWatch(
-      watch,
-      `Confirmed, but the entry has escaped: ${opportunity.detail}`,
-      mid,
-      { entryMissedBy: opportunity.reason, opportunity, signals: result.signals },
-    );
+    // Only one of these answers means the setup is over. RISK_INVERTED is
+    // price at or through the stop: there is no trade left to take at any
+    // price, and no retrace brings one back. Every other refusal is about
+    // where price is standing right now, and price moves — so the watch
+    // keeps running and says so, once per reason rather than once per
+    // poll. See opportunityWithheldMessage for why this used to resolve.
+    if (opportunityEndsSetup(opportunity.reason)) {
+      watch.lastReason = "entry_opportunity_closed";
+      record(watch, "entry_missed", { reason: opportunity.reason, detail: opportunity.detail, price: mid }, now);
+      entryMissedWatch(
+        watch,
+        `Confirmed, but the entry has escaped: ${opportunity.detail}`,
+        mid,
+        { entryMissedBy: opportunity.reason, opportunity, signals: result.signals },
+      );
+      return;
+    }
+    watch.lastReason = "entry_price_unfavourable";
+    if (watch.opportunityWithheld !== opportunity.reason) {
+      watch.opportunityWithheld = opportunity.reason;
+      store.dirty = true;
+      record(
+        watch,
+        "entry_withheld",
+        { action: opportunity.reason, detail: opportunity.detail, price: mid },
+        now,
+      );
+      // PRICE_UNUSABLE is a feed problem, not a market one. It says
+      // nothing to the operator and must not reach him as if it did.
+      if (opportunity.reason !== "PRICE_UNUSABLE") {
+        notify(opportunityWithheldMessage(watch, opportunity, mid), {
+          dedupeKey: `${watch.id}:withheld:${opportunity.reason}`,
+          priority: "normal",
+        });
+      }
+    }
     return;
+  }
+  // The refusal is behind us; a later one must be able to speak again.
+  if (watch.opportunityWithheld) {
+    watch.opportunityWithheld = null;
+    store.dirty = true;
   }
 
   // §19 — the evidence is complete and the ratio still holds, so the SETUP

@@ -23,6 +23,7 @@ import {
   emptySequence,
   evaluateAntiSl,
   evaluateEntryOpportunity,
+  opportunityEndsSetup,
   evaluateSafety,
   confirmationDeadlineFor,
   evaluateTimeWindow,
@@ -1320,4 +1321,44 @@ test("L79 — drift in the operator's favour still has to leave the trade its ro
     "4.53 of room left — wait for price to come back to the zone");
   assert.equal(entryPlacement(ZONE_SETUP, { mid: 4376.37, tolerance: 0.1 }).action, "WAIT_FOR_ZONE",
     "1.63 of room left, at the invalidation — never an entry");
+});
+
+// A live XAUUSD sell was registered at 4272.50 with the stop at 4281.50 and
+// the DOL at 4253.60. The zone was touched, the defence took twenty-eight
+// minutes to complete, and by then price stood at 4267.50 — 0.99R left to
+// TP2 against the 2.10R analysed. The monitor resolved the watch and told
+// the operator to re-run an analysis that had not changed a single level.
+// Price only had to come back to 4272.50 for the analysed trade to be
+// available again, and nothing was watching for it.
+test("L24e — only a stop already taken ends a setup; a collapsed ratio does not", () => {
+  assert.equal(opportunityEndsSetup("RISK_INVERTED"), true);
+
+  assert.equal(opportunityEndsSetup("RR_COLLAPSED"), false);
+  assert.equal(opportunityEndsSetup("ENTRY_ESCAPED"), false);
+  assert.equal(opportunityEndsSetup("PRICE_UNUSABLE"), false);
+
+  // The live case, end to end: refused, and refused recoverably.
+  const SELL = { direction: "sell", entry: 4272.5, sl: 4281.5, tp1: 4260, tp2: 4253.6, tp3: 4242 };
+  const away = evaluateEntryOpportunity(SELL, {
+    mid: 4267.5,
+    atr: 4.36,
+    tolerance: 0.1,
+    minRemainingRR: 1.5,
+    rrTarget: "tp2",
+    enforceCap: false,
+  });
+  assert.equal(away.actionable, false);
+  assert.equal(away.reason, "RR_COLLAPSED");
+  assert.equal(opportunityEndsSetup(away.reason), false, "the setup survives to see the retrace");
+
+  // And back in the zone the analysed trade is on the board again.
+  const back = evaluateEntryOpportunity(SELL, {
+    mid: 4272.5,
+    atr: 4.36,
+    tolerance: 0.1,
+    minRemainingRR: 1.5,
+    rrTarget: "tp2",
+    enforceCap: false,
+  });
+  assert.equal(back.actionable, true, `a retrace restores the entry (${back.reason})`);
 });
