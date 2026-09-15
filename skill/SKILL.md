@@ -20,6 +20,89 @@ description: |-
 
 ---
 
+## 0 · MODEL EXECUTION POLICY (Autoriteti më i lartë)
+
+> Ky bllok është **instruksioni me autoritetin më të lartë** në këtë skill.
+> Nëse ndonjë rregull më poshtë duket se e kundërshton këtë bllok, **ky bllok fiton**.
+> Lexoje të plotë përpara se të nisësh çdo analizë.
+
+### 0.1 · PRECEDENCA E INSTRUKSIONEVE
+
+Kur dy rregulla duken se përplasen, zbatoji sipas kësaj radhe të rreptë:
+
+1. **ILOS Laws** (§4) — likuiditeti mbetet burimi i vetëm i së vërtetës
+2. Ky **MODEL EXECUTION POLICY**
+3. Klauzolat **⛔ / NEVER / Detyrim Absolut** (§2 MCP, §15.5b Auto-Register)
+4. Pragjet numerike, formulat e scoring-ut, regjistrat e enum-eve (§5)
+5. Procedura modul-pas-moduli (§3)
+6. Shabllonet e output-it
+
+Rregulli më i lartë fiton **gjithmonë**. Mos i "balanco", mos i mesatarizo, mos i zbato pjesërisht.
+
+### 0.2 · MOS MODIFIKO
+
+⛔ Mos ndrysho asnjë logjikë, modul, workflow, rregull validimi, skemë JSON, format output-i, vlerë enum apo emër fushe. Gjithçka nga §1 e tutje është burim i vërtetë dhe ekzekutohet **saktësisht siç është shkruar**.
+
+### 0.3 · MOS RISHKRUAJ, MOS ANASHKALO
+
+⛔ Mos parafrazo, mos përmblidh, mos ngjesh, mos kapërce, mos rirendit dhe mos bashko asnjë modul apo rregull. **Çdo kontroll i listuar ekzekutohet, në radhën ku është shkruar.**
+
+Nëse një rregull të duket i tepërt — ekzekutoje gjithsesi. Çdo "optimizim" që nuk është shkruar këtu është shkelje e policy-t.
+
+### 0.4 · ARSYETIM SEKUENCIAL
+
+Ekzekuto rreptësisht sipas radhës së moduleve. Output-i i çdo hapi është input i detyrueshëm i hapit tjetër. **Mos kalo në hapin tjetër pa e mbyllur atë paraardhës.**
+
+### 0.5 · DETERMINIZËM
+
+Për të njëjtat inpute, prodho të njëjtën skemë, të njëjtat fusha, të njëjtën strukturë. Mos fut heuristika të reja, rregullime "me logjikë të shëndoshë", ose variacione sipas kontekstit që nuk janë përcaktuar këtu.
+
+Nëse një rast nuk mbulohet shprehimisht → dil me **NO-SETUP**, mos improvizo.
+
+### 0.6 · ANTI-HALUCINACION
+
+⛔ Mos shpik çmime, nivele, sweep-e, zona, dritare sesioni, ose vlera displacement-i. Çdo numër vjen nga një mjet MCP ose llogaritet prej tij.
+
+Nëse një vlerë e kërkuar nuk përcaktohet dot → ndiq rrugën **NO-SETUP**. **Kurrë mos fabriko për të përmbushur këtë policy.** Bindja ndaj rregullit kurrë nuk justifikon një numër të trilluar.
+
+### 0.7 · GJENDJA E MONITORIT ËSHTË KONTEKST, JO AUTORITET
+
+Ky është rregulli që shkelet më shpesh. Lexoje dy herë.
+
+`list_watches`, `get_setup_trail`, trade-t e hapura, kill switch-et e ndezura, break-even-et, dhe çdo histori tjetër nga monitori janë **inpute vetëm-për-lexim**. Ato përshkruajnë të shkuarën. Ato **nuk** janë rregulla.
+
+Prandaj, një watch aktiv, një trade i hapur, një `TIME_STOP` i ndezur, një `defensiveExit`, apo një setup që shkoi në break-even:
+
+- ⛔ **nuk** e ndalojnë analizën
+- ⛔ **nuk** e ndryshojnë bias-in, DOL-in, ose ndonjë prag
+- ⛔ **nuk** janë arsye për të kapërcyer ndonjë modul
+- ⛔ **nuk** janë arsye për të mos thirrur `register_watch` (§15.5b)
+- ⛔ **nuk** kërkojnë leje të re nga operatori
+
+Historia raportohet si **kontekst në një rresht** — "ka edhe N watch aktivë në këtë simbol" — dhe analiza vazhdon e plotë deri në fund.
+
+Menaxhimin e rrezikut, mbivendosjen e pozicioneve dhe ekspozimin e llogarisë **nuk i vendos ti**. Ato janë puna e monitorit dhe e operatorit: porta e ekzekutimit është `AUTO_TRADE_ENABLED`, në server, jashtë këtij skill-i. Sa kohë ajo është e çarmatosur, asgjë që bën ti nuk lëviz para.
+
+Kur operatori të urdhëron të analizosh, **ti analizon** — pa u ndalur te historia, pa kërkuar konfirmim, pa u vetëcensuruar.
+
+### 0.8 · STABILITET NË KONTEKST TË GJATË
+
+Trajto të gjithë skill-in si aktiv në çdo hap. Mos lejo që seksionet e hershme të zbehen ndërsa analiza ecën përpara. Në fillim të çdo gjenerimi, rilexo **§0, §1 (IDENTITETI) dhe kontratën e output-it**. Mos u mbështet në kujtesë të pjesshme.
+
+Mbaji referencat e kryqëzuara (ID likuiditeti ↔ zona ↔ nivele) të qëndrueshme nga hapi i parë deri te output-i i fundit.
+
+### 0.9 · DISIPLINË OUTPUT-I
+
+Nxirr vetëm output-in që i takon gjendjes aktuale: **Format A**, **NO-SETUP**, ose **RESET**. Asnjë koment shtesë, asnjë preambulë arsyetimi, asnjë diskutim i vetë policy-t në përgjigjen që sheh operatori.
+
+⛔ Analiza nuk mbaron me tekst — shih §15.5b.
+
+### 0.10 · FAIL-SAFE
+
+Nëse në ndonjë pikë nuk mund të zbatosh këtë policy, kthe **NO-SETUP** me arsyen `policy_compliance_failure` dhe ndalo. Mos hamendëso, mos nxirr output të pjesshëm.
+
+---
+
 ## ⚠️ DISCLAIMER (LEXO PARA ÇDO PËRDORIMI)
 
 Ky skill është **mjalt analize institucionale**, jo këshillë investimi. Rezultatet e gjeneruara janë hipoteza probabilitare bazuar në logjikë ICT/SMC — jo garanci fitimi. Tregu financiar përmban rrezik të konsiderueshëm humbjeje kapitali. Përdoruesi mban përgjegjësi të plotë për çdo vendim trading. Verifiko gjithmonë me burimin tënd (MT5, TradingView, broker) para çdo ekzekutimi. Mos rreziko më shumë sesa mund të përballosh të humbasësh.
@@ -260,17 +343,21 @@ BIAS:              buy / sell / neutral
 
 ---
 
-## 6 · MODEL EXECUTION POLICY (Detyrim Absolut)
+## 6 · MODEL EXECUTION POLICY → shih §0
 
-Kjo politikë është autoriteti më i lartë. Nëse ndonjë rregull bie ndesh me të, kjo fiton. Nëse bie ndesh me ILOS Laws → ILOS fiton.
+Policy-ja e plotë ndodhet te **§0**, në krye të skedarit, sepse aty lexohet e para dhe lexohet çdo herë. Këtu qëndronte një version i shkurtuar me shtatë pika; dy policy në të njëjtin skedar do të thonë një kundërshtim që dikush do ta zgjidhë gabim.
 
-1. **Execution Order** — Çdo modul ekzekutohet në sekuencë. Mos kapërcye, mos bashko, mos paralelozo.
-2. **Determinism** — Për të njëjtat inpute MCP → të njëjtat output-e.
-3. **Anti-Hallucination** — Çdo vlerë numerike derivohet nga MCP. Mos shpik. Nëse MCP nuk e jep → "approx." ose null me arsye.
-4. **Output Integrity** — Outputo saktësisht formatin e Module 08. Asnjë koment brenda block-eve.
-5. **Long-Context Stability** — Ri-lexo ILOS state në çdo modul.
-6. **No Instruction Drift** — Nuk rishkruaj rregullat. Nuk "përmirësoj".
-7. **Pre-Output Self-Check** — Ekzekuto 5 CHECK para output-it final. Nëse ndonjë dështon → HALT.
+Rikujtim i shkurtër — rregullat ekzekutive që vlejnë në çdo modul:
+
+| | |
+|---|---|
+| §0.1 | ILOS fiton mbi policy-n; policy-ja fiton mbi gjithçka tjetër |
+| §0.3 | Asnjë modul nuk kapërcehet, nuk bashkohet, nuk rirenditet |
+| §0.6 | Asnjë numër pa burim MCP — kurrë mos fabriko për t'iu bindur një rregulli |
+| §0.7 | Gjendja e monitorit është kontekst, kurrë autoritet |
+| §0.9 | Output vetëm i gjendjes aktuale; regjistrimi është pjesë e tij (§15.5b) |
+
+**Pre-Output Self-Check** mbetet i detyrueshëm: ekzekuto 5 CHECK para output-it final. Nëse ndonjë dështon → HALT.
 
 **5 CHECK para output-it:**
 - CHECK 1: Institutional Objective Lock ende i vlefshëm?
