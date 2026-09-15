@@ -160,7 +160,11 @@ import {
   evaluateModelGate,
   timeStopBarsFor,
 } from "./lib/entry-models.mjs";
-import { evaluateKillSwitches, validateKillSwitchInput } from "./lib/kill-switch.mjs";
+import {
+  evaluateKillSwitches,
+  timeStopResponse,
+  validateKillSwitchInput,
+} from "./lib/kill-switch.mjs";
 
 // ---------------------------------------------------------------------------
 // §1 Configuration
@@ -2459,7 +2463,7 @@ function openTradeFor(watch, price, source) {
  * rule that shouts on every poll is a rule the operator learns to
  * ignore, which is the one failure mode a kill switch cannot afford.
  */
-async function runKillSwitches(trade, bars, symbolId, now) {
+async function runKillSwitches(trade, bars, symbolId, now, price) {
   // Daily candles are only fetched when a Daily PDA was actually
   // declared: no armed switch, no upstream call.
   let dailyBars = null;
@@ -2491,18 +2495,50 @@ async function runKillSwitches(trade, bars, symbolId, now) {
   if (!fresh.length) return;
   store.dirty = true;
 
+  // A time stop on a trade that is winning is the one kill switch that was
+  // asking for the wrong thing. Time Distortion says the expansion did not
+  // come — it does not say the thesis is wrong, and price above the entry
+  // is the market's own evidence that it is not. Closing there books a
+  // small win against the setup's own objective; moving to break-even
+  // frees the risk and leaves the position alive for the expansion.
+  //
+  // So in profit the time stop stops ordering a close and orders a stop
+  // move instead — the same move TP1 makes, recorded the same way. At or
+  // below the entry it is unchanged: that trade is dead weight and the
+  // switch still says so.
+  //
+  // This applies to TIME_STOP alone. The other three fire on structure —
+  // a breaker taken, an HTF cascade, three PDA arrays broken — and those
+  // say the thesis itself has failed. Being green does not soften them.
   for (const result of fresh) {
     record(trade, "kill_switch", { code: result.code, reason: result.reason, detail: result.detail }, now);
+    const toBreakEven =
+      result.code === "TIME_STOP" && timeStopResponse(trade, price) === "BREAK_EVEN";
+    if (toBreakEven && !trade.breakEvenAt && trade.sl !== trade.entry) {
+      trade.plannedSl = trade.sl;
+      trade.sl = trade.entry;
+      trade.breakEvenAt = new Date(now).toISOString();
+      record(trade, "break_even", { from: trade.plannedSl, to: trade.sl }, now);
+    }
     notify(
-      `<b>⛔ KILL SWITCH — MBYLLE TRADE</b>\n` +
+      (toBreakEven
+        ? `<b>⏳ TIME STOP — VENDOSE BREAK-EVEN</b>\n`
+        : `<b>⛔ KILL SWITCH — MBYLLE TRADE</b>\n`) +
         `<b>${htmlEscape(trade.symbol)}</b> ${htmlEscape(directionLabel(trade))}\n` +
         `<b>Setup ID:</b> ${htmlEscape(trade.setup_id || trade.parentWatchId)}\n` +
         `<b>Rregulli:</b> ${htmlEscape(result.code)}\n` +
         `<b>Arsyeja:</b> ${htmlEscape(result.reason)}\n` +
-        `<b>Entry:</b> ${htmlEscape(formatLevel(trade.entry))} | ` +
-        `<b>SL:</b> ${htmlEscape(formatLevel(trade.sl))}\n` +
-        `<i>Mbylle pozicionin manualisht te brokeri. Monitori nuk ka urdhër mbyllës — ` +
-        `vazhdon ta ndjekë trade-in dhe do të raportojë SL/TP nëse e mban hapur.</i>`,
+        `<b>Entry:</b> ${htmlEscape(formatLevel(trade.entry))}` +
+        (finiteNumber(price) !== null
+          ? ` | <b>Price:</b> ${htmlEscape(formatLevel(price))}`
+          : "") +
+        `\n${levelsLine(trade)}\n` +
+        (toBreakEven
+          ? `<i>➔ LËVIZ STOP LOSS-IN TE ENTRY (${htmlEscape(formatLevel(trade.entry))}) — BREAK-EVEN.\n` +
+            `Trade-i është në fitim, ndaj nuk kërkohet mbyllje: zgjerimi nuk erdhi në kohë, ` +
+            `por teza nuk ka rënë. Monitori tashmë e ndjek stopin te Entry — lëvize edhe te brokeri yt.</i>`
+          : `<i>Mbylle pozicionin manualisht te brokeri. Monitori nuk ka urdhër mbyllës — ` +
+            `vazhdon ta ndjekë trade-in dhe do të raportojë SL/TP nëse e mban hapur.</i>`),
       { dedupeKey: `${trade.id}:kill:${result.code}`, priority: "critical" },
     );
   }
@@ -2615,7 +2651,7 @@ async function tickTradeWatch(trade) {
   // there is no closing order behind a manual position, so the operator
   // is told, loudly and once, and the trade stays tracked.
   if (CONFIG.killSwitchesEnabled && structureSeries.status === "OK") {
-    await runKillSwitches(trade, structureSeries.bars, symbolId, now);
+    await runKillSwitches(trade, structureSeries.bars, symbolId, now, mid);
   }
 
   const progress = evaluateTradeProgress(trade, { mid, protective, nowMs: now });
