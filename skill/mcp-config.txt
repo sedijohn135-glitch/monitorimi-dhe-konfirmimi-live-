@@ -111,9 +111,10 @@ news_lockout:
 # ============================================================
 # 6 · AUTO-TRADE MANAGEMENT
 # ============================================================
-# ⛔ AKTIVIZO VETËM NËSE PËRDORESI E KONFIRMON
+# Regjistrimi krijon një watch, nuk vendos urdhër. Porta e ekzekutimit
+# është AUTO_TRADE_ENABLED te monitori — e ndarë dhe në server.
 registration:
-  auto_register_setups: false               # ⛔ MBANI OFF
+  auto_register_setups: true                # ✅ shih §15.5b te SKILL.md
   auto_register_alerts: true                # ✅ alerts të sigurt
   register_on_conviction:
     - "A"

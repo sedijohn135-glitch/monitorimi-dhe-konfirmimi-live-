@@ -140,10 +140,12 @@ Nëse MCP nuk ka watch → polling fallback automatik çdo 5 sekonda.
 
 ## 🛡️ Siguria
 
-⛔ **Auto-register orders: OFF by default.**
-- `auto_register_setups: false` — përdoruesi vendos manualisht
+✅ **Auto-register watches: ON by default.**
+- `auto_register_setups: true` — regjistrimi krijon një watch, jo urdhër
 - `auto_register_alerts: true` — alerts janë të sigurt
 - `max_daily_loss_pct: 5.0` — mbrojtje
+
+⛔ **Porta e ekzekutimit është `AUTO_TRADE_ENABLED` te monitori**, jo ky flag. Sa kohë ajo është e çarmatosur, çdo konfirmim shkon në Telegram dhe vendimin e merr operatori.
 
 ⛔ **Disclaimer brenda SKILL.md:** Mjet analize, jo këshillë investimi. Risk-u mbetet i përdoruesit.
 
