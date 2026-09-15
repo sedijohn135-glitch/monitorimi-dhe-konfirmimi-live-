@@ -22,6 +22,7 @@ import {
   evaluateBreakerPrecedence,
   evaluateHtfCascade,
   evaluateTimeStop,
+  timeStopResponse,
   validateKillSwitchInput,
 } from "../lib/kill-switch.mjs";
 import { validateWatchInput } from "../lib/core.mjs";
@@ -340,4 +341,28 @@ test("KS9 — the Time Stop waits for its candles, then judges the best excursio
   const moved = evaluateTimeStop(trade(), delivered, { barsAllowed: 12, minProgress: 0.5 });
   assert.equal(moved.fired, false);
   assert.match(moved.reason, /dorëzohet/);
+});
+
+// A fired time stop on a winning trade used to order a close. It killed a
+// live XAUUSD long that was in profit, 45 minutes into a Judas Swing entry,
+// on the doorstep of the London Silver Bullet window. Time Distortion means
+// the expansion has not come — not that the thesis is broken — and price
+// beyond the entry is the market's own evidence that it is not.
+test("a fired time stop asks for break-even while the trade is in profit", () => {
+  const long = { direction: "buy", entry: 4289.2 };
+  const short = { direction: "sell", entry: 4289.2 };
+
+  assert.equal(timeStopResponse(long, 4293.06), "BREAK_EVEN");
+  assert.equal(timeStopResponse(short, 4285), "BREAK_EVEN");
+
+  // At or below the entry nothing has been earned and nothing is protected.
+  assert.equal(timeStopResponse(long, 4289.2), "CLOSE");
+  assert.equal(timeStopResponse(long, 4280), "CLOSE");
+  assert.equal(timeStopResponse(short, 4289.2), "CLOSE");
+  assert.equal(timeStopResponse(short, 4295), "CLOSE");
+
+  // An unknown price is never the permissive answer.
+  assert.equal(timeStopResponse(long, null), "CLOSE");
+  assert.equal(timeStopResponse(long, Number.NaN), "CLOSE");
+  assert.equal(timeStopResponse({ direction: "buy" }, 4293), "CLOSE");
 });
